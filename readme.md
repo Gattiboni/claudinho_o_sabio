@@ -20,14 +20,61 @@ humano nos momentos que importam. O agente:
 
 ---
 
-## Protocolos Implementados
+## Protocolo Cascade
+
+Protocolo primario do agente. Identifica momentum real em altcoins confirmado em
+cascata do timeframe maior para o menor. So entra quando os tres timeframes
+apontam na mesma direcao.
+
+### Logica de entrada
+
+```
+1h  (macro):   MA7 > MA25 > MA99
+               MACD histograma positivo e crescente
+               Preco abaixo da banda superior (espaco disponivel)
+
+15m (medio):   StochRSI subindo e abaixo de 80 (nao sobrecomprado)
+               TSI positivo
+               Volume acima da media de 20 periodos
+
+5m  (entrada): MACD recem cruzado pra cima ou histograma crescente
+               Preco acima da MA7
+               Bollinger com espaco ate a banda superior
+```
+
+### Gestao de risco dinamica
+
+O spread da Bollinger no 5min no momento da entrada define tanto o SL quanto o
+callback do trailing:
+
+```
+Spread BB 5m < 5%:   SL = banda inferior BB   |   Callback = 1%
+Spread BB 5m >= 5%:  SL = banda inferior BB   |   Callback = 2%
+```
+
+O SL e sempre a banda inferior da Bollinger no 5min — o mercado define onde a
+tese quebrou, nao um percentual arbitrario.
+
+### Universo de ativos
+
+- Top 30 e bottom 30 simbolos USDT por variacao nas ultimas 24h
+- Filtro minimo: volume 24h acima de $10M USD
+- Universo dinamico: recalculado a cada scan
+
+### Sem TP fixo
+
+O trailing faz o trabalho. O mercado entrega o que tiver.
+
+---
+
+## Outros Protocolos (planejados)
 
 | Protocolo                         | Descricao                                       | Status    |
 | --------------------------------- | ----------------------------------------------- | --------- |
-| GEM - Guarded Exposure Model      | Entrada em assimetria com Bollinger estreitando | Fase 1    |
 | BVE - Bird View Entry             | Trailing duplo sem TP fixo                      | Planejado |
 | PBS - Precision Breakout Scalping | Rompimento de topo de Bollinger com corpo cheio | Planejado |
 | Curious GEM                       | Gestao pos-TP1 com trailing independente        | Planejado |
+| GEM - Guarded Exposure Model      | Entrada em assimetria com Bollinger estreitando | Planejado |
 | Houdini Strategic Scatter         | Matriz de altcoins fora do radar                | Planejado |
 | Scout In Action (SIA)             | Sondagem de ativos com entrada minima           | Planejado |
 | TOD - Trailing Overweight Defense | Protecao de ganhos com trailing 3%              | Planejado |
@@ -39,13 +86,15 @@ humano nos momentos que importam. O agente:
 ```
 claudinho_o_sabio/
 ├── README.md               <- este arquivo
+├── CHANGELOG.md            <- historico de versoes e mudancas
+├── DECISION_LOG.md         <- registro de decisoes de arquitetura
 ├── .env                    <- credenciais (NUNCA versionar)
 ├── .env.example            <- template de variaveis sem valores reais
 ├── .gitignore
 ├── requirements.txt        <- dependencias Python
 ├── config.py               <- parametros dos protocolos e da banca
 └── src/
-    ├── market_reader.py    <- leitura de candles e calculo de indicadores
+    ├── market_reader.py    <- scanner Cascade: leitura e identificacao de setups
     ├── protocol_engine.py  <- logica de decisao dos protocolos (fase 2)
     ├── notifier.py         <- envio de alertas via Telegram (fase 2)
     └── executor.py         <- execucao de ordens na Binance (fase 3)
@@ -57,16 +106,17 @@ claudinho_o_sabio/
 
 ### Fase 1 - Olhos (leitura, sem dinheiro)
 
+Status: em andamento
+
 - Conexao com API publica da Binance Futures (fapi.binance.com)
 - Leitura de candles nos timeframes 5min, 15min, 1h
-- Calculo de: MACD, Stoch RSI, Bollinger Bands, TLI, Volume, MAs (7, 25, 99)
-- Output em terminal: setup identificado ou ausencia de setup
+- Calculo de: MACD, StochRSI, Bollinger Bands, TSI, Volume, MAs (7, 25, 99)
+- Scanner dinamico: top 30 e bottom 30 por variacao 24h
+- Output em terminal: setups Cascade identificados com entrada, SL e callback
 
 ### Fase 2 - Voz (notificacao, sem execucao)
 
-- Deteccao automatica de condicoes de entrada por protocolo
-- Envio de alerta via Telegram com: ativo, timeframe, protocolo ativado, SL
-  sugerido, contexto de risco
+- Envio de alerta via Telegram com analise estruturada
 - Pipeline de analise de trades exportados da Binance
 
 ### Fase 3 - Maos (execucao supervisionada)
@@ -79,7 +129,7 @@ claudinho_o_sabio/
 ### Fase 4 - Cerebro (autonomia total)
 
 - Operacao sem aprovacao humana dentro dos limites de risco definidos
-- Re-avaliacao e relatorio diario de performance
+- Relatorio diario de performance
 
 ---
 
@@ -110,7 +160,7 @@ Meta de performance:    5% a 7% ao dia (quando condicoes ideais)
 
 ---
 
-## Setup Local (Fase 1)
+## Setup Local
 
 ```bash
 # 1. Clonar o repositorio
@@ -129,7 +179,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # editar .env com suas credenciais
 
-# 5. Rodar o leitor de mercado
+# 5. Rodar o scanner
 python src/market_reader.py
 ```
 
