@@ -15,6 +15,8 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # CONFIGURACAO
 # -----------------------------------------------------------------------
 
+DEBUG = True  # False em producao
+
 BINANCE_BASE_URL  = "https://fapi.binance.com"
 VOLUME_MIN_24H_USD = 10_000_000
 TOP_BOTTOM_N      = 30
@@ -49,8 +51,8 @@ CALLBACK_HIGH_VOLATILITY = 2.0
 # Correlacao BTC
 BTC_SYMBOL           = "BTCUSDT"
 CORR_WINDOW          = 20       # velas para calcular correlacao
-CORR_ALIGNED_MIN     = 0.7     # acima disso: andando junto com BTC
-CORR_INDEPENDENT_MAX = 0.3     # abaixo disso: vida propria
+CORR_ALIGNED_MIN     = 0.6     # acima disso: andando junto com BTC
+CORR_INDEPENDENT_MAX = 0.4     # abaixo disso: vida propria
 
 
 # -----------------------------------------------------------------------
@@ -236,39 +238,62 @@ def bb_spread_pct(row):
         return None
 
 
+def bb_bands_rising(df, window=5):
+    """
+    Verifica se ambas as bandas da Bollinger estao inclinadas para cima
+    nas ultimas `window` velas. Nao precisa ser explosivo — so nao pode
+    estar caindo.
+    """
+    if df is None or len(df) < window + 1:
+        return False
+    upper_rising = df["bb_upper"].iloc[-1] > df["bb_upper"].iloc[-window]
+    lower_rising = df["bb_lower"].iloc[-1] > df["bb_lower"].iloc[-window]
+    return upper_rising and lower_rising
+
+
 def check_1h(df):
     """
-    Filtro macro no 1h:
-    - MA7 > MA25 > MA99
-    - MACD histograma positivo e crescente
-    - Preco abaixo da banda superior
+    VETO no 1h — so rejeita se claramente contra o movimento.
+    Nao e confirmacao, e freio de mao.
+
+    Rejeita se:
+    - MA completamente invertida (MA7 < MA99, tendencia baixista estrutural)
+    - MACD fortemente negativo (histograma abaixo de zero por margem relevante)
+
+    Passa em tudo mais — inclusive MAs em formacao ou MACD proximo de zero.
     """
     if df is None or len(df) < 2:
         return False, {}
 
     last = df.iloc[-1]
-    prev = df.iloc[-2]
 
-    ma_ok    = last["ma7"] > last["ma25"] and last["ma25"] > last["ma99"]
-    macd_ok  = last["macd_hist"] > 0 and last["macd_hist"] > prev["macd_hist"]
-    space_ok = last["close"] < last["bb_upper"]
+    # Veto de MA: so rejeita se MA7 abaixo de MA99 (inversao estrutural)
+    ma_veto = last["ma7"] < last["ma99"]
 
-    passed  = ma_ok and macd_ok and space_ok
+    # Veto de MACD: so rejeita se histograma claramente negativo
+    # Usa 20% da media do valor absoluto do hist como threshold de "claramente"
+    hist_abs_mean = df["macd_hist"].abs().tail(20).mean()
+    macd_veto = last["macd_hist"] < -(hist_abs_mean * 0.5)
+
+    vetoed  = ma_veto or macd_veto
+    passed  = not vetoed
+
     details = {
-        "ma_alignment":      ma_ok,
-        "macd_expanding":    macd_ok,
-        "space_to_upper_bb": space_ok,
+        "ma_veto":        ma_veto,
+        "macd_veto":      macd_veto,
+        "ma7_above_ma99": last["ma7"] > last["ma99"],
+        "macd_hist":      round(float(last["macd_hist"]), 8),
     }
     return passed, details
 
 
-def check_15m(df, df_btc_15m, ma_alignment_1h=False):
+def check_15m(df, df_btc_15m):
     """
-    Confirmacao no 15m:
-    - StochRSI subindo (limite 80 dispensado se MA 1h alinhada)
+    CONFIRMACAO no 15m:
+    - StochRSI acima de 50 E ascendendo
     - TSI positivo
-    - Volume acima da media
-    - Correlacao BTC: alinhado ou independente (zona morta descartada)
+    - Ambas as bandas BB inclinadas para cima
+    - Correlacao BTC: alinhado ou independente
     """
     if df is None or len(df) < 2:
         return False, {}
@@ -277,39 +302,38 @@ def check_15m(df, df_btc_15m, ma_alignment_1h=False):
     prev = df.iloc[-2]
 
     stoch_rising = last["stoch_k"] > prev["stoch_k"]
-    if ma_alignment_1h:
-        stoch_ok = stoch_rising
-    else:
-        stoch_ok = stoch_rising and last["stoch_k"] < 80
+    stoch_above50 = last["stoch_k"] > 50
+    stoch_ok = stoch_rising and stoch_above50
 
     tsi_raw = last.get("tsi", float("nan"))
     tsi_ok  = (not pd.isna(tsi_raw)) and (tsi_raw > 0)
 
-    volume_ok = last["volume"] > last["volume_ma20"]
+    bb_ok = bb_bands_rising(df)
 
-    corr_15m      = calc_btc_correlation(df, df_btc_15m)
+    corr_15m       = calc_btc_correlation(df, df_btc_15m)
     corr_class_15m = classify_btc_correlation(corr_15m)
-    btc_ok        = corr_class_15m in ("aligned", "independent")
+    btc_ok         = corr_class_15m in ("aligned", "independent")
 
-    passed  = stoch_ok and tsi_ok and volume_ok and btc_ok
+    passed  = stoch_ok and tsi_ok and bb_ok and btc_ok
     details = {
-        "stoch_rsi_rising":     stoch_rising,
-        "stoch_k_value":        round(last["stoch_k"], 2),
-        "stoch_limit_bypassed": ma_alignment_1h and last["stoch_k"] >= 80,
-        "tsi_positive":         tsi_ok,
-        "volume_above_avg":     volume_ok,
-        "btc_correlation":      corr_15m,
-        "btc_case":             corr_class_15m,
+        "stoch_rsi_rising":  stoch_rising,
+        "stoch_above_50":    stoch_above50,
+        "stoch_k_value":     round(last["stoch_k"], 2),
+        "tsi_positive":      tsi_ok,
+        "bb_bands_rising":   bb_ok,
+        "btc_correlation":   corr_15m,
+        "btc_case":          corr_class_15m,
     }
     return passed, details
 
 
 def check_5m(df, df_btc_5m):
     """
-    Entrada no 5m:
-    - MACD cruzado ou expandindo
+    GATILHO no 5m — onde o setup aparece primeiro:
+    - MACD positivo E ascendente (histograma crescendo)
+    - StochRSI e TSI apontando na mesma direcao (ambos subindo)
+    - Ambas as bandas BB inclinadas para cima
     - Preco acima da MA7
-    - Espaco ate banda superior
     - Correlacao BTC: alinhado ou independente
     - Calcula SL e callback via spread BB
     """
@@ -319,13 +343,36 @@ def check_5m(df, df_btc_5m):
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    macd_cross     = prev["macd"] <= prev["macd_signal"] and last["macd"] > last["macd_signal"]
-    macd_expanding = last["macd_hist"] > 0 and last["macd_hist"] > prev["macd_hist"]
-    macd_ok        = macd_cross or macd_expanding
+    # MACD ascendente em direcao ao zero ou acima dele
+    # Sweet spot: histograma subindo com forca, independente do sinal
+    # StochRSI e TSI ja confirmam — MACD ligeiramente antes do cruzamento e ouro
+    macd_ascending = last["macd_hist"] > prev["macd_hist"]
+    macd_positive  = last["macd_hist"] > 0
+    # Aceita MACD ainda negativo se estiver claramente subindo em direcao ao zero
+    # Threshold: histograma negativo mas ja recuperou pelo menos 30% do seu minimo recente
+    macd_min_recent = df["macd_hist"].tail(10).min()
+    if macd_positive:
+        macd_ok = macd_ascending
+    elif macd_ascending and macd_min_recent < 0:
+        recovery = (last["macd_hist"] - macd_min_recent) / abs(macd_min_recent)
+        macd_ok = recovery >= 0.30
+    else:
+        macd_ok = False
 
+    # StochRSI e TSI na mesma direcao (ambos subindo)
+    stoch_rising = last["stoch_k"] > prev["stoch_k"]
+    tsi_raw      = last.get("tsi", float("nan"))
+    tsi_rising   = (not pd.isna(tsi_raw)) and (tsi_raw > prev.get("tsi", float("nan")))
+    tsi_positive = (not pd.isna(tsi_raw)) and (tsi_raw > 0)
+    same_dir_ok  = stoch_rising and tsi_rising and tsi_positive
+
+    # BB inclinadas para cima
+    bb_ok = bb_bands_rising(df)
+
+    # Preco acima da MA7
     price_above_ma7 = last["close"] > last["ma7"]
-    space_ok        = last["close"] < last["bb_upper"]
 
+    # SL e callback via spread
     spread = bb_spread_pct(last)
     if spread is None:
         return False, {}
@@ -334,16 +381,32 @@ def check_5m(df, df_btc_5m):
     sl_pct   = round((last["close"] - last["bb_lower"]) / last["close"] * 100, 2)
     callback = CALLBACK_HIGH_VOLATILITY if spread >= BB_SPREAD_THRESHOLD_PCT else CALLBACK_LOW_VOLATILITY
 
-    corr_5m      = calc_btc_correlation(df, df_btc_5m)
+    # Correlacao BTC
+    corr_5m       = calc_btc_correlation(df, df_btc_5m)
     corr_class_5m = classify_btc_correlation(corr_5m)
-    btc_ok       = corr_class_5m in ("aligned", "independent")
+    btc_ok        = corr_class_5m in ("aligned", "independent")
 
-    passed  = macd_ok and price_above_ma7 and space_ok and btc_ok
+    # Calcula recovery para exibir no output
+    try:
+        macd_min_recent = df["macd_hist"].tail(10).min()
+        if not macd_positive and macd_ascending and macd_min_recent < 0:
+            macd_recovery_val = round((last["macd_hist"] - macd_min_recent) / abs(macd_min_recent) * 100, 1)
+        else:
+            macd_recovery_val = None
+    except Exception:
+        macd_recovery_val = None
+
+    passed  = macd_ok and same_dir_ok and bb_ok and price_above_ma7 and btc_ok
     details = {
         "macd_ok":              macd_ok,
-        "macd_cross":           macd_cross,
+        "macd_positive":        macd_positive,
+        "macd_ascending":       macd_ascending,
+        "macd_recovery":        macd_recovery_val,
+        "stoch_rsi_rising":     stoch_rising,
+        "tsi_rising":           tsi_rising,
+        "tsi_positive":         tsi_positive,
+        "bb_bands_rising":      bb_ok,
         "price_above_ma7":      price_above_ma7,
-        "space_to_upper_bb":    space_ok,
         "bb_spread_pct":        round(spread, 2),
         "sl_level":             round(sl_level, 6),
         "sl_pct_from_entry":    sl_pct,
@@ -389,8 +452,7 @@ def scan_market():
         df_5m  = calculate_indicators(get_candles(symbol, "5m"))
 
         ok_1h,  details_1h  = check_1h(df_1h)
-        ok_15m, details_15m = check_15m(df_15m, df_btc_15m,
-                                         ma_alignment_1h=details_1h.get("ma_alignment", False))
+        ok_15m, details_15m = check_15m(df_15m, df_btc_15m)
         ok_5m,  details_5m  = check_5m(df_5m, df_btc_5m)
 
         if ok_1h and ok_15m and ok_5m:
@@ -404,6 +466,28 @@ def scan_market():
             }
             setups.append(setup)
             print(f"  [SETUP] {symbol} | {change:+.2f}% 24h | BTC 15m: {details_15m['btc_case']} | BTC 5m: {details_5m['btc_case']}")
+        elif DEBUG:
+            motivos = []
+            if not ok_1h:
+                if details_1h.get("ma_veto"):                  motivos.append("1h:MA_veto")
+                if details_1h.get("macd_veto"):                motivos.append("1h:MACD_veto")
+            if not ok_15m:
+                if not details_15m.get("stoch_rsi_rising"):    motivos.append("15m:StochRSI")
+                if not details_15m.get("stoch_above_50"):      motivos.append("15m:Stoch<50")
+                if not details_15m.get("tsi_positive"):        motivos.append("15m:TSI")
+                if not details_15m.get("bb_bands_rising"):     motivos.append("15m:BB_dir")
+                if details_15m.get("btc_case") == "dead_zone": motivos.append("15m:BTC_dz")
+                if details_15m.get("btc_case") == "unknown":   motivos.append("15m:BTC_unk")
+            if not ok_5m:
+                if not details_5m.get("macd_ascending"):       motivos.append("5m:MACD_flat")
+                if not details_5m.get("macd_ok"):              motivos.append("5m:MACD_recovery<30%")
+                if not details_5m.get("stoch_rsi_rising"):     motivos.append("5m:StochRSI")
+                if not details_5m.get("tsi_rising"):           motivos.append("5m:TSI_flat")
+                if not details_5m.get("bb_bands_rising"):      motivos.append("5m:BB_dir")
+                if not details_5m.get("price_above_ma7"):      motivos.append("5m:MA7")
+                if details_5m.get("btc_case") == "dead_zone":  motivos.append("5m:BTC_dz")
+                if details_5m.get("btc_case") == "unknown":    motivos.append("5m:BTC_unk")
+            print(f"  [SKIP] {symbol:20s} | {change:+6.2f}% | {', '.join(motivos)}")
 
     return setups
 
@@ -428,19 +512,18 @@ def print_setup(setup):
     print(f"BB superior 5m:         {d5['bb_upper']}")
     print("-" * 60)
     print("Confirmacoes:")
-    print(f"  1h  - MA alinhada:       {s['1h']['ma_alignment']}")
-    print(f"  1h  - MACD expandindo:   {s['1h']['macd_expanding']}")
-    print(f"  1h  - Espaco BB:         {s['1h']['space_to_upper_bb']}")
-
-    stoch_line = f"  15m - StochRSI subindo:  {s['15m']['stoch_rsi_rising']}  (valor: {s['15m']['stoch_k_value']}"
-    if s['15m']['stoch_limit_bypassed']:
-        stoch_line += "  [limite 80 dispensado - MA 1h forte]"
-    print(stoch_line + ")")
-
+    print(f"  1h  - MA7 acima MA99:    {s['1h']['ma7_above_ma99']}  [veto MA: {s['1h']['ma_veto']}]")
+    print(f"  1h  - MACD veto:         {s['1h']['macd_veto']}  (hist: {s['1h']['macd_hist']})")
+    print(f"  15m - StochRSI subindo:  {s['15m']['stoch_rsi_rising']}  acima 50: {s['15m']['stoch_above_50']}  (valor: {s['15m']['stoch_k_value']})")
     print(f"  15m - TSI positivo:      {s['15m']['tsi_positive']}")
-    print(f"  15m - Volume acima avg:  {s['15m']['volume_above_avg']}")
+    print(f"  15m - BB inclinadas:     {s['15m']['bb_bands_rising']}")
     print(f"  15m - BTC correlacao:    {s['15m']['btc_correlation']}  [{s['15m']['btc_case']}]")
-    print(f"  5m  - MACD ok:           {s['5m']['macd_ok']}")
+    macd_str = f"positivo: {s['5m']['macd_positive']}  ascendente: {s['5m']['macd_ascending']}"
+    if not s['5m']['macd_positive'] and s['5m'].get('macd_recovery') is not None:
+        macd_str += f"  recovery: {s['5m']['macd_recovery']}%"
+    print(f"  5m  - MACD:              {macd_str}")
+    print(f"  5m  - StochRSI subindo:  {s['5m']['stoch_rsi_rising']}  TSI subindo: {s['5m']['tsi_rising']}")
+    print(f"  5m  - BB inclinadas:     {s['5m']['bb_bands_rising']}")
     print(f"  5m  - Preco > MA7:       {s['5m']['price_above_ma7']}")
     print(f"  5m  - BTC correlacao:    {s['5m']['btc_correlation']}  [{s['5m']['btc_case']}]")
     print("=" * 60)
