@@ -5,7 +5,7 @@
 import warnings
 import requests
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 from datetime import datetime
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -17,10 +17,10 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 DEBUG = True  # False em producao
 
-BINANCE_BASE_URL  = "https://fapi.binance.com"
+BINANCE_BASE_URL   = "https://fapi.binance.com"
 VOLUME_MIN_24H_USD = 10_000_000
-TOP_BOTTOM_N      = 30
-CANDLES_LIMIT     = 100
+TOP_BOTTOM_N       = 30
+CANDLES_LIMIT      = 100
 
 # Bollinger
 BB_PERIOD = 20
@@ -50,9 +50,74 @@ CALLBACK_HIGH_VOLATILITY = 2.0
 
 # Correlacao BTC
 BTC_SYMBOL           = "BTCUSDT"
-CORR_WINDOW          = 20       # velas para calcular correlacao
-CORR_ALIGNED_MIN     = 0.6     # acima disso: andando junto com BTC
-CORR_INDEPENDENT_MAX = 0.4     # abaixo disso: vida propria
+CORR_WINDOW          = 20
+CORR_ALIGNED_MIN     = 0.6
+CORR_INDEPENDENT_MAX = 0.4
+
+
+# -----------------------------------------------------------------------
+# INDICADORES NATIVOS (sem pandas_ta)
+# -----------------------------------------------------------------------
+
+def calc_sma(series, period):
+    return series.rolling(window=period).mean()
+
+
+def calc_bbands(series, period=BB_PERIOD, std=BB_STD):
+    mid   = series.rolling(window=period).mean()
+    sigma = series.rolling(window=period).std(ddof=0)
+    upper = mid + std * sigma
+    lower = mid - std * sigma
+    return upper, mid, lower
+
+
+def calc_macd(series, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
+    ema_fast   = series.ewm(span=fast,   adjust=False).mean()
+    ema_slow   = series.ewm(span=slow,   adjust=False).mean()
+    macd_line  = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram  = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def calc_rsi(series, period):
+    delta = series.diff()
+    gain  = delta.clip(lower=0)
+    loss  = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+    rs  = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def calc_stochrsi(series, rsi_period=STOCH_RSI_PERIOD, stoch_period=STOCH_RSI_PERIOD,
+                  k_period=STOCH_RSI_K, d_period=STOCH_RSI_D):
+    rsi        = calc_rsi(series, rsi_period)
+    rsi_min    = rsi.rolling(window=stoch_period).min()
+    rsi_max    = rsi.rolling(window=stoch_period).max()
+    stoch_rsi  = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
+    k          = stoch_rsi.rolling(window=k_period).mean()
+    d          = k.rolling(window=d_period).mean()
+    return k, d
+
+
+def calc_tsi(series, fast=TSI_FAST, slow=TSI_SLOW):
+    """
+    True Strength Index.
+    TSI = 100 * EMA(EMA(delta, slow), fast) / EMA(EMA(abs(delta), slow), fast)
+    """
+    delta     = series.diff()
+    abs_delta = delta.abs()
+
+    smooth1     = delta.ewm(span=slow,   adjust=False).mean()
+    double_smooth = smooth1.ewm(span=fast, adjust=False).mean()
+
+    smooth1_abs     = abs_delta.ewm(span=slow, adjust=False).mean()
+    double_smooth_abs = smooth1_abs.ewm(span=fast, adjust=False).mean()
+
+    tsi = 100 * double_smooth / (double_smooth_abs + 1e-10)
+    return tsi
 
 
 # -----------------------------------------------------------------------
@@ -60,10 +125,6 @@ CORR_INDEPENDENT_MAX = 0.4     # abaixo disso: vida propria
 # -----------------------------------------------------------------------
 
 def get_top_bottom_symbols(n=TOP_BOTTOM_N, volume_min=VOLUME_MIN_24H_USD):
-    """
-    Retorna top N e bottom N simbolos USDT por variacao 24h,
-    filtrados por volume minimo.
-    """
     url = f"{BINANCE_BASE_URL}/fapi/v1/ticker/24hr"
     try:
         response = requests.get(url, timeout=10)
@@ -98,9 +159,6 @@ def get_top_bottom_symbols(n=TOP_BOTTOM_N, volume_min=VOLUME_MIN_24H_USD):
 
 
 def get_candles(symbol, interval, limit=CANDLES_LIMIT):
-    """
-    Retorna DataFrame OHLCV para o simbolo e intervalo dados.
-    """
     url    = f"{BINANCE_BASE_URL}/fapi/v1/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
@@ -130,17 +188,6 @@ def get_candles(symbol, interval, limit=CANDLES_LIMIT):
 # -----------------------------------------------------------------------
 
 def calc_btc_correlation(df_asset, df_btc, window=CORR_WINDOW):
-    """
-    Calcula correlacao de Pearson entre a variacao percentual do ativo
-    e do BTC nas ultimas `window` velas.
-
-    Retorna float entre -1 e 1, ou None se dados insuficientes.
-
-    Interpretacao:
-      > CORR_ALIGNED_MIN    : andando junto com BTC (caso A)
-      < CORR_INDEPENDENT_MAX: vida propria, ignorando BTC (caso B)
-      entre os dois         : zona morta, sem sinal claro
-    """
     if df_asset is None or df_btc is None:
         return None
     if len(df_asset) < window or len(df_btc) < window:
@@ -160,13 +207,6 @@ def calc_btc_correlation(df_asset, df_btc, window=CORR_WINDOW):
 
 
 def classify_btc_correlation(corr):
-    """
-    Retorna o caso de correlacao para o Cascade:
-      'aligned'     : andando junto com BTC forte (permitido)
-      'independent' : vida propria, ignorando BTC (permitido)
-      'dead_zone'   : zona morta entre os dois (descartado)
-      'unknown'     : correlacao nao calculavel (descartado)
-    """
     if corr is None:
         return "unknown"
     if corr >= CORR_ALIGNED_MIN:
@@ -181,46 +221,27 @@ def classify_btc_correlation(corr):
 # -----------------------------------------------------------------------
 
 def calculate_indicators(df):
-    """
-    Adiciona indicadores tecnicos ao DataFrame.
-    """
     if df is None or len(df) < BB_PERIOD + 10:
         return None
 
     for period in MA_PERIODS:
-        df[f"ma{period}"] = ta.sma(df["close"], length=period)
+        df[f"ma{period}"] = calc_sma(df["close"], period)
 
-    bb = ta.bbands(df["close"], length=BB_PERIOD, std=BB_STD)
-    if bb is not None:
-        cols         = bb.columns.tolist()
-        bb_lower_col = [c for c in cols if c.startswith("BBL")][0]
-        bb_mid_col   = [c for c in cols if c.startswith("BBM")][0]
-        bb_upper_col = [c for c in cols if c.startswith("BBU")][0]
-        df["bb_upper"] = bb[bb_upper_col]
-        df["bb_mid"]   = bb[bb_mid_col]
-        df["bb_lower"] = bb[bb_lower_col]
+    bb_upper, bb_mid, bb_lower = calc_bbands(df["close"])
+    df["bb_upper"] = bb_upper
+    df["bb_mid"]   = bb_mid
+    df["bb_lower"] = bb_lower
 
-    macd = ta.macd(df["close"], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
-    if macd is not None:
-        df["macd"]        = macd[f"MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"]
-        df["macd_signal"] = macd[f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"]
-        df["macd_hist"]   = macd[f"MACDh_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"]
+    macd_line, signal_line, histogram = calc_macd(df["close"])
+    df["macd"]      = macd_line
+    df["macd_signal"] = signal_line
+    df["macd_hist"] = histogram
 
-    stoch = ta.stochrsi(df["close"], length=STOCH_RSI_PERIOD, rsi_length=STOCH_RSI_PERIOD,
-                        k=STOCH_RSI_K, d=STOCH_RSI_D)
-    if stoch is not None:
-        cols          = stoch.columns.tolist()
-        df["stoch_k"] = stoch[cols[0]]
-        df["stoch_d"] = stoch[cols[1]]
+    stoch_k, stoch_d = calc_stochrsi(df["close"])
+    df["stoch_k"] = stoch_k
+    df["stoch_d"] = stoch_d
 
-    try:
-        tsi = ta.tsi(df["close"], fast=TSI_FAST, slow=TSI_SLOW)
-        if tsi is not None and not tsi.empty:
-            df["tsi"] = tsi.iloc[:, 0]
-        else:
-            df["tsi"] = float("nan")
-    except Exception:
-        df["tsi"] = float("nan")
+    df["tsi"] = calc_tsi(df["close"])
 
     df["volume_ma20"] = df["volume"].rolling(20).mean()
 
@@ -239,11 +260,6 @@ def bb_spread_pct(row):
 
 
 def bb_bands_rising(df, window=5):
-    """
-    Verifica se ambas as bandas da Bollinger estao inclinadas para cima
-    nas ultimas `window` velas. Nao precisa ser explosivo — so nao pode
-    estar caindo.
-    """
     if df is None or len(df) < window + 1:
         return False
     upper_rising = df["bb_upper"].iloc[-1] > df["bb_upper"].iloc[-window]
@@ -252,31 +268,18 @@ def bb_bands_rising(df, window=5):
 
 
 def check_1h(df):
-    """
-    VETO no 1h — so rejeita se claramente contra o movimento.
-    Nao e confirmacao, e freio de mao.
-
-    Rejeita se:
-    - MA completamente invertida (MA7 < MA99, tendencia baixista estrutural)
-    - MACD fortemente negativo (histograma abaixo de zero por margem relevante)
-
-    Passa em tudo mais — inclusive MAs em formacao ou MACD proximo de zero.
-    """
     if df is None or len(df) < 2:
         return False, {}
 
     last = df.iloc[-1]
 
-    # Veto de MA: so rejeita se MA7 abaixo de MA99 (inversao estrutural)
     ma_veto = last["ma7"] < last["ma99"]
 
-    # Veto de MACD: so rejeita se histograma claramente negativo
-    # Usa 20% da media do valor absoluto do hist como threshold de "claramente"
     hist_abs_mean = df["macd_hist"].abs().tail(20).mean()
     macd_veto = last["macd_hist"] < -(hist_abs_mean * 0.5)
 
-    vetoed  = ma_veto or macd_veto
-    passed  = not vetoed
+    vetoed = ma_veto or macd_veto
+    passed = not vetoed
 
     details = {
         "ma_veto":        ma_veto,
@@ -288,22 +291,15 @@ def check_1h(df):
 
 
 def check_15m(df, df_btc_15m):
-    """
-    CONFIRMACAO no 15m:
-    - StochRSI acima de 50 E ascendendo
-    - TSI positivo
-    - Ambas as bandas BB inclinadas para cima
-    - Correlacao BTC: alinhado ou independente
-    """
     if df is None or len(df) < 2:
         return False, {}
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    stoch_rising = last["stoch_k"] > prev["stoch_k"]
+    stoch_rising  = last["stoch_k"] > prev["stoch_k"]
     stoch_above50 = last["stoch_k"] > 50
-    stoch_ok = stoch_rising and stoch_above50
+    stoch_ok      = stoch_rising and stoch_above50
 
     tsi_raw = last.get("tsi", float("nan"))
     tsi_ok  = (not pd.isna(tsi_raw)) and (tsi_raw > 0)
@@ -328,28 +324,14 @@ def check_15m(df, df_btc_15m):
 
 
 def check_5m(df, df_btc_5m):
-    """
-    GATILHO no 5m — onde o setup aparece primeiro:
-    - MACD positivo E ascendente (histograma crescendo)
-    - StochRSI e TSI apontando na mesma direcao (ambos subindo)
-    - Ambas as bandas BB inclinadas para cima
-    - Preco acima da MA7
-    - Correlacao BTC: alinhado ou independente
-    - Calcula SL e callback via spread BB
-    """
     if df is None or len(df) < 2:
         return False, {}
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # MACD ascendente em direcao ao zero ou acima dele
-    # Sweet spot: histograma subindo com forca, independente do sinal
-    # StochRSI e TSI ja confirmam — MACD ligeiramente antes do cruzamento e ouro
     macd_ascending = last["macd_hist"] > prev["macd_hist"]
     macd_positive  = last["macd_hist"] > 0
-    # Aceita MACD ainda negativo se estiver claramente subindo em direcao ao zero
-    # Threshold: histograma negativo mas ja recuperou pelo menos 30% do seu minimo recente
     macd_min_recent = df["macd_hist"].tail(10).min()
     if macd_positive:
         macd_ok = macd_ascending
@@ -359,20 +341,16 @@ def check_5m(df, df_btc_5m):
     else:
         macd_ok = False
 
-    # StochRSI e TSI na mesma direcao (ambos subindo)
     stoch_rising = last["stoch_k"] > prev["stoch_k"]
     tsi_raw      = last.get("tsi", float("nan"))
     tsi_rising   = (not pd.isna(tsi_raw)) and (tsi_raw > prev.get("tsi", float("nan")))
     tsi_positive = (not pd.isna(tsi_raw)) and (tsi_raw > 0)
     same_dir_ok  = stoch_rising and tsi_rising and tsi_positive
 
-    # BB inclinadas para cima
     bb_ok = bb_bands_rising(df)
 
-    # Preco acima da MA7
     price_above_ma7 = last["close"] > last["ma7"]
 
-    # SL e callback via spread
     spread = bb_spread_pct(last)
     if spread is None:
         return False, {}
@@ -381,12 +359,10 @@ def check_5m(df, df_btc_5m):
     sl_pct   = round((last["close"] - last["bb_lower"]) / last["close"] * 100, 2)
     callback = CALLBACK_HIGH_VOLATILITY if spread >= BB_SPREAD_THRESHOLD_PCT else CALLBACK_LOW_VOLATILITY
 
-    # Correlacao BTC
     corr_5m       = calc_btc_correlation(df, df_btc_5m)
     corr_class_5m = classify_btc_correlation(corr_5m)
     btc_ok        = corr_class_5m in ("aligned", "independent")
 
-    # Calcula recovery para exibir no output
     try:
         macd_min_recent = df["macd_hist"].tail(10).min()
         if not macd_positive and macd_ascending and macd_min_recent < 0:
@@ -398,24 +374,24 @@ def check_5m(df, df_btc_5m):
 
     passed  = macd_ok and same_dir_ok and bb_ok and price_above_ma7 and btc_ok
     details = {
-        "macd_ok":              macd_ok,
-        "macd_positive":        macd_positive,
-        "macd_ascending":       macd_ascending,
-        "macd_recovery":        macd_recovery_val,
-        "stoch_rsi_rising":     stoch_rising,
-        "tsi_rising":           tsi_rising,
-        "tsi_positive":         tsi_positive,
-        "bb_bands_rising":      bb_ok,
-        "price_above_ma7":      price_above_ma7,
-        "bb_spread_pct":        round(spread, 2),
-        "sl_level":             round(sl_level, 6),
-        "sl_pct_from_entry":    sl_pct,
+        "macd_ok":               macd_ok,
+        "macd_positive":         macd_positive,
+        "macd_ascending":        macd_ascending,
+        "macd_recovery":         macd_recovery_val,
+        "stoch_rsi_rising":      stoch_rising,
+        "tsi_rising":            tsi_rising,
+        "tsi_positive":          tsi_positive,
+        "bb_bands_rising":       bb_ok,
+        "price_above_ma7":       price_above_ma7,
+        "bb_spread_pct":         round(spread, 2),
+        "sl_level":              round(sl_level, 6),
+        "sl_pct_from_entry":     sl_pct,
         "trailing_callback_pct": callback,
-        "entry_price":          round(last["close"], 6),
-        "bb_upper":             round(last["bb_upper"], 6),
-        "bb_lower":             round(last["bb_lower"], 6),
-        "btc_correlation":      corr_5m,
-        "btc_case":             corr_class_5m,
+        "entry_price":           round(last["close"], 6),
+        "bb_upper":              round(last["bb_upper"], 6),
+        "bb_lower":              round(last["bb_lower"], 6),
+        "btc_correlation":       corr_5m,
+        "btc_case":              corr_class_5m,
     }
     return passed, details
 
@@ -434,7 +410,6 @@ def scan_market():
 
     print(f"[INFO] {len(symbols_data)} simbolos no universo (top/bottom {TOP_BOTTOM_N} por variacao 24h)")
 
-    # BTC buscado uma vez, reutilizado para todos os ativos
     df_btc_15m = get_candles(BTC_SYMBOL, "15m")
     df_btc_5m  = get_candles(BTC_SYMBOL, "5m")
 

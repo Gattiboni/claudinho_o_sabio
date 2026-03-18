@@ -1,6 +1,6 @@
 requests
 pandas
-pandas-ta
+numpy
 python-dotenv
 python-telegram-bot
 anthropic

@@ -12,7 +12,6 @@ warnings.filterwarnings("ignore")
 
 import requests
 import pandas as pd
-import pandas_ta as ta
 from datetime import datetime
 from spark_universe import get_spark_universe
 
@@ -48,6 +47,18 @@ CALLBACK_HIGH            = 5.0  # explosao em mercado mais volatil
 
 
 # -----------------------------------------------------------------------
+# INDICADORES NATIVOS (sem pandas_ta)
+# -----------------------------------------------------------------------
+
+def calc_bbands(series, period=BB_PERIOD, std=BB_STD):
+    mid   = series.rolling(window=period).mean()
+    sigma = series.rolling(window=period).std(ddof=0)
+    upper = mid + std * sigma
+    lower = mid - std * sigma
+    return upper, mid, lower
+
+
+# -----------------------------------------------------------------------
 # COLETA DE DADOS
 # -----------------------------------------------------------------------
 
@@ -58,7 +69,7 @@ def get_candles(symbol, interval, limit=CANDLES_LIMIT):
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         raw  = resp.json()
-    except Exception as e:
+    except Exception:
         return None
 
     df = pd.DataFrame(raw, columns=[
@@ -80,14 +91,11 @@ def get_candles(symbol, interval, limit=CANDLES_LIMIT):
 def add_bbands(df):
     if df is None or len(df) < BB_PERIOD + 5:
         return None
-    bb = ta.bbands(df["close"], length=BB_PERIOD, std=BB_STD)
-    if bb is None:
-        return None
-    cols = bb.columns.tolist()
-    df["bb_upper"] = bb[[c for c in cols if c.startswith("BBU")][0]]
-    df["bb_mid"]   = bb[[c for c in cols if c.startswith("BBM")][0]]
-    df["bb_lower"] = bb[[c for c in cols if c.startswith("BBL")][0]]
-    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_mid"] * 100
+    upper, mid, lower = calc_bbands(df["close"])
+    df["bb_upper"] = upper
+    df["bb_mid"]   = mid
+    df["bb_lower"] = lower
+    df["bb_width"] = (upper - lower) / mid * 100
     df["volume_ma20"] = df["volume"].rolling(20).mean()
     return df
 
@@ -97,10 +105,6 @@ def add_bbands(df):
 # -----------------------------------------------------------------------
 
 def check_compression(df_1h, df_15m):
-    """
-    Verifica se o ativo esta comprimido no 1h e confirmando no 15m.
-    Compressao = BBW atual no bottom 25% do historico proprio do ativo.
-    """
     if df_1h is None or df_15m is None:
         return False, {}
 
@@ -110,36 +114,27 @@ def check_compression(df_1h, df_15m):
     if df_1h is None or df_15m is None:
         return False, {}
 
-    # BBW atual vs historico do proprio ativo no 1h
-    bbw_now_1h   = df_1h["bb_width"].iloc[-1]
-    bbw_pct_1h   = (df_1h["bb_width"] <= bbw_now_1h).mean() * 100
+    bbw_now_1h    = df_1h["bb_width"].iloc[-1]
+    bbw_pct_1h    = (df_1h["bb_width"] <= bbw_now_1h).mean() * 100
     compressed_1h = bbw_pct_1h <= BBW_PERCENTILE_THRESHOLD
 
-    # Confirma compressao tambem no 15m
-    bbw_now_15m   = df_15m["bb_width"].iloc[-1]
-    bbw_pct_15m   = (df_15m["bb_width"] <= bbw_now_15m).mean() * 100
-    compressed_15m = bbw_pct_15m <= BBW_PERCENTILE_THRESHOLD + 10  # um pouco mais tolerante
+    bbw_now_15m    = df_15m["bb_width"].iloc[-1]
+    bbw_pct_15m    = (df_15m["bb_width"] <= bbw_now_15m).mean() * 100
+    compressed_15m = bbw_pct_15m <= BBW_PERCENTILE_THRESHOLD + 10
 
     passed  = compressed_1h and compressed_15m
     details = {
-        "bbw_1h":            round(float(bbw_now_1h), 4),
-        "bbw_percentile_1h": round(bbw_pct_1h, 1),
-        "compressed_1h":     compressed_1h,
-        "bbw_15m":           round(float(bbw_now_15m), 4),
+        "bbw_1h":             round(float(bbw_now_1h), 4),
+        "bbw_percentile_1h":  round(bbw_pct_1h, 1),
+        "compressed_1h":      compressed_1h,
+        "bbw_15m":            round(float(bbw_now_15m), 4),
         "bbw_percentile_15m": round(bbw_pct_15m, 1),
-        "compressed_15m":    compressed_15m,
+        "compressed_15m":     compressed_15m,
     }
     return passed, details
 
 
 def check_presignal(df_5m):
-    """
-    Verifica pre-sinal no 5m:
-    - Ultimas N velas com corpo medio (nao doji)
-    - Fechando levemente pra cima
-    - Volume ligeiramente crescente
-    - Preco encostando na banda superior sem romper ainda
-    """
     if df_5m is None:
         return False, {}
 
@@ -147,49 +142,38 @@ def check_presignal(df_5m):
     if df_5m is None:
         return False, {}
 
-    recent = df_5m.iloc[-(PRESIGNAL_CANDLES + 1):-1]  # exclui vela atual em formacao
+    recent = df_5m.iloc[-(PRESIGNAL_CANDLES + 1):-1]
     last   = df_5m.iloc[-1]
 
-    # Corpo medio nas ultimas velas
     bodies_ok = all(
         abs(row["close"] - row["open"]) / (row["high"] - row["low"] + 1e-10) >= BODY_RATIO_MIN
         for _, row in recent.iterrows()
     )
 
-    # Fechando levemente pra cima (maioria das velas)
     closes_up = sum(
         1 for _, row in recent.iterrows() if row["close"] > row["open"]
     ) >= (PRESIGNAL_CANDLES - 1)
 
-    # Volume crescendo mas sem explosao
     vol_mean   = df_5m["volume_ma20"].iloc[-1]
     vol_creep  = recent["volume"].mean() >= vol_mean * VOLUME_CREEP_FACTOR
-    vol_no_exp = recent["volume"].max() < vol_mean * 2.5  # sem explosao prematura
+    vol_no_exp = recent["volume"].max() < vol_mean * 2.5
 
-    # Preco proximo da banda superior (encostando)
     dist_to_upper = (last["bb_upper"] - last["close"]) / last["bb_upper"] * 100
-    near_upper    = dist_to_upper <= 1.5  # a menos de 1.5% da banda
+    near_upper    = dist_to_upper <= 1.5
 
     passed  = bodies_ok and closes_up and vol_creep and vol_no_exp and near_upper
     details = {
-        "bodies_ok":       bodies_ok,
-        "closes_up":       closes_up,
-        "vol_creep":       vol_creep,
-        "vol_no_explosion": vol_no_exp,
-        "near_upper_bb":   near_upper,
-        "dist_to_upper_pct": round(dist_to_upper, 2),
+        "bodies_ok":          bodies_ok,
+        "closes_up":          closes_up,
+        "vol_creep":          vol_creep,
+        "vol_no_explosion":   vol_no_exp,
+        "near_upper_bb":      near_upper,
+        "dist_to_upper_pct":  round(dist_to_upper, 2),
     }
     return passed, details
 
 
 def check_trigger(df_1m):
-    """
-    Gatilho PAH no 1m:
-    - Vela mais recente com volume 3x+ acima da media
-    - Corpo cheio (close perto do high)
-    - Rompimento da banda superior
-    Calcula SL e callback para o Spark.
-    """
     if df_1m is None:
         return False, {}
 
@@ -198,36 +182,34 @@ def check_trigger(df_1m):
         return False, {}
 
     last = df_1m.iloc[-1]
-    prev = df_1m.iloc[-2]
 
     vol_mean      = df_1m["volume_ma20"].iloc[-1]
     vol_explosion = last["volume"] >= vol_mean * VOLUME_EXPLOSION_FACTOR
 
     candle_range = last["high"] - last["low"]
     body_ratio   = abs(last["close"] - last["open"]) / (candle_range + 1e-10)
-    full_body     = body_ratio >= BODY_FULL_RATIO
+    full_body    = body_ratio >= BODY_FULL_RATIO
 
     breakout = last["close"] > last["bb_upper"]
 
-    # SL e callback
-    spread = (last["bb_upper"] - last["bb_lower"]) / last["bb_lower"] * 100
+    spread    = (last["bb_upper"] - last["bb_lower"]) / last["bb_lower"] * 100
     sl_level  = last["bb_lower"]
     sl_pct    = round((last["close"] - last["bb_lower"]) / last["close"] * 100, 2)
     callback  = CALLBACK_HIGH if spread >= BB_SPREAD_LOW_THRESHOLD else CALLBACK_LOW
 
     passed  = vol_explosion and full_body and breakout
     details = {
-        "vol_explosion":     vol_explosion,
-        "vol_ratio":         round(last["volume"] / (vol_mean + 1e-10), 2),
-        "full_body":         full_body,
-        "body_ratio":        round(body_ratio, 2),
-        "breakout_upper_bb": breakout,
-        "entry_price":       round(float(last["close"]), 6),
-        "sl_level":          round(float(sl_level), 6),
-        "sl_pct_from_entry": sl_pct,
+        "vol_explosion":         vol_explosion,
+        "vol_ratio":             round(last["volume"] / (vol_mean + 1e-10), 2),
+        "full_body":             full_body,
+        "body_ratio":            round(body_ratio, 2),
+        "breakout_upper_bb":     breakout,
+        "entry_price":           round(float(last["close"]), 6),
+        "sl_level":              round(float(sl_level), 6),
+        "sl_pct_from_entry":     sl_pct,
         "trailing_callback_pct": callback,
-        "bb_spread_pct":     round(spread, 2),
-        "bb_upper":          round(float(last["bb_upper"]), 6),
+        "bb_spread_pct":         round(spread, 2),
+        "bb_upper":              round(float(last["bb_upper"]), 6),
     }
     return passed, details
 
@@ -248,7 +230,6 @@ def scan_spark():
         symbol = item["symbol"]
         change = item["change_pct"]
 
-        # Fase 1: compressao no 1h e 15m
         df_1h  = get_candles(symbol, "1h")
         df_15m = get_candles(symbol, "15m")
 
@@ -264,31 +245,27 @@ def scan_spark():
                 print(f"  [SKIP-COMP]  {symbol:20s} | {change:+6.2f}% | {', '.join(motivos)}")
             continue
 
-        # Fase 2: pre-sinal no 5m
         df_5m = get_candles(symbol, "5m")
         ok_pre, details_pre = check_presignal(df_5m)
 
         if not ok_pre:
             if DEBUG:
                 motivos = []
-                if not details_pre.get("bodies_ok"):       motivos.append("5m:corpo_fraco")
-                if not details_pre.get("closes_up"):        motivos.append("5m:direcao")
-                if not details_pre.get("vol_creep"):        motivos.append("5m:vol_baixo")
-                if not details_pre.get("vol_no_explosion"): motivos.append("5m:vol_explodiu_cedo")
-                if not details_pre.get("near_upper_bb"):    motivos.append(f"5m:longe_BB({details_pre.get('dist_to_upper_pct', '?')}%)")
+                if not details_pre.get("bodies_ok"):        motivos.append("5m:corpo_fraco")
+                if not details_pre.get("closes_up"):         motivos.append("5m:direcao")
+                if not details_pre.get("vol_creep"):         motivos.append("5m:vol_baixo")
+                if not details_pre.get("vol_no_explosion"):  motivos.append("5m:vol_explodiu_cedo")
+                if not details_pre.get("near_upper_bb"):     motivos.append(f"5m:longe_BB({details_pre.get('dist_to_upper_pct', '?')}%)")
                 print(f"  [SKIP-PRE]   {symbol:20s} | {change:+6.2f}% | {', '.join(motivos)}")
             continue
 
-        # Fase 3: gatilho no 1m
         df_1m = get_candles(symbol, "1m")
         ok_trig, details_trig = check_trigger(df_1m)
 
         if not ok_trig:
-            # Comprimido e com pre-sinal mas sem gatilho ainda — candidato a monitorar
             print(f"  [CANDIDATO]  {symbol:20s} | {change:+6.2f}% | comprimido + pre-sinal | aguardando PAH")
             continue
 
-        # Setup completo
         spark = {
             "symbol":         symbol,
             "change_24h_pct": change,
