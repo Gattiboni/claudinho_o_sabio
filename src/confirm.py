@@ -4,6 +4,9 @@
 #
 # Uso: py -3.11 src/confirm.py
 # O script solicita o simbolo no terminal e devolve o score completo.
+#
+# analyze_to_dict(symbol) -> dict
+#   Retorna os mesmos dados de analyze() em formato dict, para uso pelo runner e notifier.
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -22,36 +25,28 @@ BINANCE_BASE_URL = "https://fapi.binance.com"
 CANDLES_LIMIT    = 100
 SCORE_MIN        = 7
 
-# Bollinger
 BB_PERIOD = 20
 BB_STD    = 2.0
 
-# MACD
 MACD_FAST   = 12
 MACD_SLOW   = 26
 MACD_SIGNAL = 9
 
-# Stoch RSI
 STOCH_RSI_PERIOD = 14
 STOCH_RSI_K      = 3
 STOCH_RSI_D      = 3
 
-# TSI
 TSI_FAST = 13
 TSI_SLOW = 25
 
-# MAs
 MA_FAST = 7
 MA_SLOW = 99
 
-# Veto 1h
 MACD_VETO_FACTOR = 0.5
 
-# Score 5m
 NEAR_BB_UPPER_PCT   = 2.0
 VOLUME_ABOVE_FACTOR = 1.2
 
-# Score 1m
 VOLUME_EXPLOSION_FACTOR = 2.5
 BODY_FULL_RATIO         = 0.5
 
@@ -195,8 +190,8 @@ def score_15m(df):
     if df is None or len(df) < 2:
         return 0, {}
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    last  = df.iloc[-1]
+    prev  = df.iloc[-2]
     score = 0
     detail = {}
 
@@ -234,8 +229,8 @@ def score_5m(df):
     if df is None or len(df) < 2:
         return 0, {}
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    last  = df.iloc[-1]
+    prev  = df.iloc[-2]
     score = 0
     detail = {}
 
@@ -269,8 +264,8 @@ def score_1m(df):
     if df is None or len(df) < 2:
         return 0, {}
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    last  = df.iloc[-1]
+    prev  = df.iloc[-2]
     score = 0
     detail = {}
 
@@ -298,10 +293,61 @@ def score_1m(df):
 
 
 # -----------------------------------------------------------------------
-# ANALISE PRINCIPAL
+# NUCLEO DE ANALISE
+# -----------------------------------------------------------------------
+
+def _build_result(symbol, df_5m, df_1h, df_15m, df_1m):
+    """
+    Executa veto, scores e monta o dict de resultado.
+    Usado por analyze() e analyze_to_dict().
+    """
+    vetoed, veto_reason = check_veto_1h(df_1h)
+
+    if vetoed:
+        return {
+            "symbol":      symbol,
+            "vetoed":      True,
+            "veto_reason": veto_reason,
+        }
+
+    s15, d15 = score_15m(df_15m)
+    s5,  d5  = score_5m(df_5m)
+    s1,  d1  = score_1m(df_1m)
+    total    = s15 + s5 + s1
+
+    entry_price = float(df_5m.iloc[-1]["close"]) if df_5m is not None else None
+    sl_level    = float(df_5m.iloc[-1]["bb_lower"]) if df_5m is not None else None
+    sl_pct      = round((entry_price - sl_level) / entry_price * 100, 2) if entry_price and sl_level else None
+    bb_spread   = round((float(df_5m.iloc[-1]["bb_upper"]) - sl_level) / sl_level * 100, 2) if df_5m is not None else None
+    callback    = 2.0 if bb_spread and bb_spread >= 5.0 else 1.0
+
+    return {
+        "symbol":      symbol,
+        "vetoed":      False,
+        "veto_reason": None,
+        "total":       total,
+        "score_15m":   s15,
+        "score_5m":    s5,
+        "score_1m":    s1,
+        "detail_15m":  d15,
+        "detail_5m":   d5,
+        "detail_1m":   d1,
+        "entry_price": entry_price,
+        "sl_level":    sl_level,
+        "sl_pct":      sl_pct,
+        "bb_spread":   bb_spread,
+        "callback":    callback,
+        "sl_warning":  sl_pct is not None and sl_pct > 8,
+        "confirmed":   total >= SCORE_MIN,
+    }
+
+
+# -----------------------------------------------------------------------
+# INTERFACE TERMINAL
 # -----------------------------------------------------------------------
 
 def analyze(symbol):
+    """Analisa o simbolo e imprime o resultado no terminal."""
     symbol = symbol.upper().strip()
     if not symbol.endswith("USDT"):
         symbol = symbol + "USDT"
@@ -312,55 +358,73 @@ def analyze(symbol):
         print(f"  Simbolo {symbol} nao encontrado na Binance Futures.")
         return
 
-    df_1h = enrich(get_candles(symbol, "1h"))
-    vetoed, veto_reason = check_veto_1h(df_1h)
+    df_1h  = enrich(get_candles(symbol, "1h"))
+    df_15m = enrich(get_candles(symbol, "15m"))
+    df_5m  = enrich(get_candles(symbol, "5m"))
+    df_1m  = enrich(get_candles(symbol, "1m"))
+
+    r = _build_result(symbol, df_5m, df_1h, df_15m, df_1m)
 
     print(f"\n{'=' * 60}")
     print(f"CONFIRMADOR - {symbol}  |  {datetime.now().strftime('%H:%M:%S')}")
     print(f"{'=' * 60}")
 
-    if vetoed:
-        print(f"\n  VETADO no 1h: {veto_reason}")
+    if r["vetoed"]:
+        print(f"\n  VETADO no 1h: {r['veto_reason']}")
         print(f"  Score: irrelevante — estrutura macro nao permite entrada.")
         print(f"\n{'=' * 60}\n")
         return
 
     print(f"  1h: passou o veto")
 
+    double     = r["detail_15m"].get("double_confirm")
+    double_tag = "  [DUPLA CONFIRMACAO TSI+STOCH]" if double else ""
+
+    print(f"\n  Score: {r['total']}/12{double_tag}")
+    print(f"  Entrada:        {r['entry_price']}")
+    print(f"  SL (BB inf 5m): {r['sl_level']}  (-{r['sl_pct']}%)")
+    print(f"  Trailing CB:    {r['callback']}%")
+    print(f"  BB spread 5m:   {r['bb_spread']}%")
+
+    if r["sl_warning"]:
+        print(f"  ATENCAO: SL acima de 8% — revise o tamanho da posicao")
+
+    d15 = r["detail_15m"]
+    d5  = r["detail_5m"]
+    d1  = r["detail_1m"]
+
+    print(f"\n  15m [{r['score_15m']}/5]: BB={d15.get('bb_rising')}  TSI={d15.get('tsi_positive')}  Stoch={d15.get('stoch_k')}  MACD={d15.get('macd_ok')}  Dupla={double}")
+    print(f"  5m  [{r['score_5m']}/4]:  Vol={d5.get('volume_ok')}  MACD={d5.get('macd_rising')}  Stoch={d5.get('stoch_k')}  DistBB={d5.get('dist_upper_pct')}%")
+    print(f"  1m  [{r['score_1m']}/3]:  VolExp={d1.get('vol_explosion')}({d1.get('vol_ratio')}x)  Corpo={d1.get('body_ratio')}  Stoch={d1.get('stoch_k')}")
+
+    status = "CONFIRMADO — score >= 7. Protocolo define a entrada." if r["confirmed"] else f"NAO CONFIRMADO — score {r['total']} abaixo do minimo {SCORE_MIN}."
+    print(f"\n  {status}")
+    print(f"\n{'=' * 60}\n")
+
+
+# -----------------------------------------------------------------------
+# INTERFACE DICT (para runner e notifier)
+# -----------------------------------------------------------------------
+
+def analyze_to_dict(symbol: str) -> dict:
+    """
+    Analisa o simbolo e retorna o resultado como dict.
+    Nao imprime nada no terminal.
+    Retorna None se o simbolo nao for encontrado na Binance.
+    """
+    symbol = symbol.upper().strip()
+    if not symbol.endswith("USDT"):
+        symbol = symbol + "USDT"
+
+    if not validate_symbol(symbol):
+        return None
+
+    df_1h  = enrich(get_candles(symbol, "1h"))
     df_15m = enrich(get_candles(symbol, "15m"))
     df_5m  = enrich(get_candles(symbol, "5m"))
     df_1m  = enrich(get_candles(symbol, "1m"))
 
-    s15, d15 = score_15m(df_15m)
-    s5,  d5  = score_5m(df_5m)
-    s1,  d1  = score_1m(df_1m)
-
-    total = s15 + s5 + s1
-
-    entry_price = float(df_5m.iloc[-1]["close"]) if df_5m is not None else None
-    sl_level    = float(df_5m.iloc[-1]["bb_lower"]) if df_5m is not None else None
-    sl_pct      = round((entry_price - sl_level) / entry_price * 100, 2) if entry_price and sl_level else None
-    bb_spread   = round((float(df_5m.iloc[-1]["bb_upper"]) - sl_level) / sl_level * 100, 2) if df_5m is not None else None
-    callback    = 2.0 if bb_spread and bb_spread >= 5.0 else 1.0
-
-    double     = d15.get("double_confirm")
-    double_tag = "  [DUPLA CONFIRMACAO TSI+STOCH]" if double else ""
-
-    print(f"\n  Score: {total}/12{double_tag}")
-    print(f"  Entrada:       {entry_price}")
-    print(f"  SL (BB inf 5m): {sl_level}  (-{sl_pct}%)")
-    print(f"  Trailing CB:   {callback}%")
-    print(f"  BB spread 5m:  {bb_spread}%")
-
-    if sl_pct and sl_pct > 8:
-        print(f"  ATENCAO: SL acima de 8% — revise o tamanho da posicao")
-
-    print(f"\n  15m [{s15}/5]: BB={d15.get('bb_rising')}  TSI={d15.get('tsi_positive')}  Stoch={d15.get('stoch_k')}  MACD={d15.get('macd_ok')}  Dupla={double}")
-    print(f"  5m  [{s5}/4]:  Vol={d5.get('volume_ok')}  MACD={d5.get('macd_rising')}  Stoch={d5.get('stoch_k')}  DistBB={d5.get('dist_upper_pct')}%")
-    print(f"  1m  [{s1}/3]:  VolExp={d1.get('vol_explosion')}({d1.get('vol_ratio')}x)  Corpo={d1.get('body_ratio')}  Stoch={d1.get('stoch_k')}")
-
-    print(f"\n  {'CONFIRMADO — score >= 7. Protocolo define a entrada.' if total >= SCORE_MIN else f'NAO CONFIRMADO — score {total} abaixo do minimo {SCORE_MIN}.'}")
-    print(f"\n{'=' * 60}\n")
+    return _build_result(symbol, df_5m, df_1h, df_15m, df_1m)
 
 
 # -----------------------------------------------------------------------
