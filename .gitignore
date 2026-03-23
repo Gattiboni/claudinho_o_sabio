@@ -1,0 +1,59 @@
+# Credenciais - NUNCA versionar
+.env
+.env.*
+!.env.example
+
+# Ambiente virtual Python
+venv/
+.venv/
+env/
+.python-version
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Distribuicao e build
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+
+# Logs
+*.log
+logs/
+
+# Dados e exports temporarios
+data/
+exports/
+*.csv
+*.json
+!pyrightconfig.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sistema operacional
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Testes
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Railway e deploy
+.railway/
