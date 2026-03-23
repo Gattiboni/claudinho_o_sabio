@@ -5,6 +5,8 @@
 # Responsabilidades:
 #   - Enviar mensagens de texto para o chat configurado
 #   - Formatar output dos scanners (top5, cascade, spark, confirm)
+#   - Persistir notificacoes enviadas no Supabase (notifications_sent)
+#   - Persistir sinais identificados no Supabase (scan_results)
 #
 # Se TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID estiverem vazios,
 # loga no terminal e segue sem crashar.
@@ -13,6 +15,8 @@ import os
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+
+from supabase_client import insert
 
 load_dotenv()
 
@@ -49,14 +53,50 @@ def send_message(text: str) -> bool:
         return False
 
 
+def _persist_notification(protocol: str, symbol: str, score: int,
+                           message_text: str, triggered_by: str):
+    """
+    Salva notificacao enviada no Supabase.
+    Falha silenciosa — nao impede o envio da mensagem.
+    """
+    try:
+        insert("notifications_sent", {
+            "protocol":     protocol,
+            "symbol":       symbol,
+            "score":        score,
+            "message_text": message_text,
+            "triggered_by": triggered_by,
+        })
+    except Exception as e:
+        print(f"[NOTIFIER] Erro ao persistir notificacao: {e}")
+
+
+def _persist_scan(protocol: str, symbol: str, score: int,
+                  details: dict, notified: bool):
+    """
+    Salva resultado de scan no Supabase.
+    Falha silenciosa.
+    """
+    try:
+        insert("scan_results", {
+            "protocol":     protocol,
+            "symbol":       symbol,
+            "score":        score,
+            "details_json": details,
+            "notified":     notified,
+        })
+    except Exception as e:
+        print(f"[NOTIFIER] Erro ao persistir scan: {e}")
+
+
 # -----------------------------------------------------------------------
 # FORMATADORES
 # -----------------------------------------------------------------------
 
-def format_top5(results: list) -> str:
+def format_top5(results: list, triggered_by: str = "loop") -> str:
     """
     Formata o output de scan_top5() para envio no Telegram.
-    Recebe a lista retornada por scan_top5().
+    Persiste scan_results e notifications_sent no Supabase.
     """
     if not results:
         return ""
@@ -91,15 +131,41 @@ def format_top5(results: list) -> str:
             f"Stoch={r['detail_1m'].get('stoch_k')}"
         )
 
+        # Persiste scan
+        _persist_scan(
+            protocol = "top5",
+            symbol   = r["symbol"],
+            score    = r["score"],
+            details  = {
+                "change_pct":  r["change_pct"],
+                "entry_price": r["entry_price"],
+                "detail_15m":  r["detail_15m"],
+                "detail_5m":   r["detail_5m"],
+                "detail_1m":   r["detail_1m"],
+            },
+            notified = True,
+        )
+
     lines.append("")
     lines.append("Score e sinal, nao certeza. Protocolo define a entrada.")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+
+    # Persiste notificacao (uma por grupo top5)
+    _persist_notification(
+        protocol     = "top5",
+        symbol       = results[0]["symbol"],
+        score        = results[0]["score"],
+        message_text = text,
+        triggered_by = triggered_by,
+    )
+
+    return text
 
 
-def format_cascade(setups: list) -> str:
+def format_cascade(setups: list, triggered_by: str = "loop") -> str:
     """
     Formata o output de scan_market() para envio no Telegram.
-    Recebe a lista retornada por scan_market().
+    Persiste scan_results e notifications_sent no Supabase.
     """
     if not setups:
         return ""
@@ -113,7 +179,7 @@ def format_cascade(setups: list) -> str:
         lines.append("")
         lines.append(f"SETUP: {s['symbol']}  |  {s['change_24h_pct']:+.2f}% 24h")
         lines.append(f"Entrada:   {d5['entry_price']}")
-        lines.append(f"SL:        {d5['sl_level']}  (-{d5['sl_pct_from_entry']}%){sl_warn}")
+        lines.append(f"SL:        {d5['sl_level']:.4f}  (-{d5['sl_pct_from_entry']}%){sl_warn}")
         lines.append(f"Trailing:  {d5['trailing_callback_pct']}%  |  BB spread: {d5['bb_spread_pct']}%")
         lines.append(f"Vol 24h:   ${s['volume_24h_usd']:,.0f}")
         lines.append(
@@ -135,13 +201,41 @@ def format_cascade(setups: list) -> str:
             f"BTC={s['5m']['btc_case']}"
         )
 
+        text = "\n".join(lines)
+
+        # Persiste scan e notificacao por ativo
+        _persist_scan(
+            protocol = "cascade",
+            symbol   = s["symbol"],
+            score    = None,
+            details  = {
+                "change_24h_pct": s["change_24h_pct"],
+                "entry_price":    d5["entry_price"],
+                "sl_level":       d5["sl_level"],
+                "sl_pct":         d5["sl_pct_from_entry"],
+                "callback":       d5["trailing_callback_pct"],
+                "bb_spread":      d5["bb_spread_pct"],
+                "1h":             s["1h"],
+                "15m":            s["15m"],
+                "5m":             s["5m"],
+            },
+            notified = True,
+        )
+        _persist_notification(
+            protocol     = "cascade",
+            symbol       = s["symbol"],
+            score        = None,
+            message_text = text,
+            triggered_by = triggered_by,
+        )
+
     return "\n".join(lines)
 
 
-def format_spark(sparks: list) -> str:
+def format_spark(sparks: list, triggered_by: str = "loop") -> str:
     """
     Formata o output de scan_spark() para envio no Telegram.
-    Recebe a lista retornada por scan_spark().
+    Persiste scan_results e notifications_sent no Supabase.
     """
     if not sparks:
         return ""
@@ -155,7 +249,7 @@ def format_spark(sparks: list) -> str:
         lines.append("")
         lines.append(f"SPARK: {s['symbol']}  |  {s['change_24h_pct']:+.2f}% 24h")
         lines.append(f"Entrada:   {tr['entry_price']}")
-        lines.append(f"SL:        {tr['sl_level']}  (-{tr['sl_pct_from_entry']}%){sl_warn}")
+        lines.append(f"SL:        {tr['sl_level']:.4f}  (-{tr['sl_pct_from_entry']}%){sl_warn}")
         lines.append(f"Trailing:  {tr['trailing_callback_pct']}%  |  BB spread: {tr['bb_spread_pct']}%")
         lines.append(f"Vol 24h:   ${s['volume_24h_usd']:,.0f}")
         lines.append(
@@ -174,13 +268,40 @@ def format_spark(sparks: list) -> str:
             f"breakout={tr['breakout_upper_bb']}"
         )
 
+        text = "\n".join(lines)
+
+        _persist_scan(
+            protocol = "spark",
+            symbol   = s["symbol"],
+            score    = None,
+            details  = {
+                "change_24h_pct": s["change_24h_pct"],
+                "entry_price":    tr["entry_price"],
+                "sl_level":       tr["sl_level"],
+                "sl_pct":         tr["sl_pct_from_entry"],
+                "callback":       tr["trailing_callback_pct"],
+                "compression":    s["compression"],
+                "presignal":      s["presignal"],
+                "trigger":        tr,
+            },
+            notified = True,
+        )
+        _persist_notification(
+            protocol     = "spark",
+            symbol       = s["symbol"],
+            score        = None,
+            message_text = text,
+            triggered_by = triggered_by,
+        )
+
     return "\n".join(lines)
 
 
-def format_confirm(symbol: str, result: dict) -> str:
+def format_confirm(symbol: str, result: dict, triggered_by: str = "manual") -> str:
     """
     Formata o resultado do confirmador para envio no Telegram.
-    Recebe o simbolo e o dict retornado por analyze_to_dict().
+    Persiste scan_results no Supabase.
+    Persiste notifications_sent apenas se score >= 7.
     """
     ts    = datetime.now().strftime("%H:%M:%S")
     lines = [f"[CONFIRM] {symbol}  |  {ts}"]
@@ -188,7 +309,9 @@ def format_confirm(symbol: str, result: dict) -> str:
     if result.get("vetoed"):
         lines.append(f"VETADO no 1h: {result['veto_reason']}")
         lines.append("Estrutura macro nao permite entrada.")
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        _persist_scan("confirm", symbol, 0, {"vetoed": True, "reason": result["veto_reason"]}, False)
+        return text
 
     total  = result["total"]
     double = result["detail_15m"].get("double_confirm")
@@ -227,7 +350,35 @@ def format_confirm(symbol: str, result: dict) -> str:
         f"Stoch={d1.get('stoch_k')}"
     )
 
-    status = "CONFIRMADO — score >= 7." if total >= 7 else f"NAO CONFIRMADO — score {total} abaixo do minimo 7."
+    confirmed = total >= 7
+    status    = "CONFIRMADO — score >= 7." if confirmed else f"NAO CONFIRMADO — score {total} abaixo do minimo 7."
     lines.append(status)
+    text = "\n".join(lines)
 
-    return "\n".join(lines)
+    _persist_scan(
+        protocol = "confirm",
+        symbol   = symbol,
+        score    = total,
+        details  = {
+            "entry_price": result["entry_price"],
+            "sl_level":    result["sl_level"],
+            "sl_pct":      result["sl_pct"],
+            "callback":    result["callback"],
+            "bb_spread":   result["bb_spread"],
+            "detail_15m":  d15,
+            "detail_5m":   d5,
+            "detail_1m":   d1,
+        },
+        notified = confirmed,
+    )
+
+    if confirmed:
+        _persist_notification(
+            protocol     = "confirm",
+            symbol       = symbol,
+            score        = total,
+            message_text = text,
+            triggered_by = triggered_by,
+        )
+
+    return text
