@@ -15,6 +15,10 @@
 #
 # Uso: py -3.11 src/runner.py
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import os
 import time
 import threading
