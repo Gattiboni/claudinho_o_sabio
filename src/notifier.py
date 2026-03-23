@@ -196,7 +196,7 @@ def format_confirm(symbol: str, result: dict) -> str:
 
     lines.append(f"Score: {total}/12{double_tag}")
     lines.append(f"Entrada:      {result['entry_price']}")
-    lines.append(f"SL (BB 5m):   {result['sl_level']}  (-{result['sl_pct']}%)")
+    lines.append(f"SL (BB 5m):   {result['sl_level']:.4f}  (-{result['sl_pct']}%)")
     lines.append(f"Trailing CB:  {result['callback']}%")
     lines.append(f"BB spread 5m: {result['bb_spread']}%")
 
