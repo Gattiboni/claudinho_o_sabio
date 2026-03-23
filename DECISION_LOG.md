@@ -5,51 +5,66 @@ o que foi decidido, por que, e quais alternativas foram descartadas.
 
 ---
 
-## [DEC-013] 2026-03-22 - Polling Telegram via requests puro
+## [DEC-020] 2026-03-23 - Janela de correlacao trade-notificacao: 5 minutos
 
-Decisao: o polling do Telegram e feito diretamente via requests para a API REST
-do Telegram, sem uso da biblioteca python-telegram-bot.
+Decisao: um trade e classificado como "claudinho" se existe notificacao para o
+mesmo simbolo nos 5 minutos anteriores ao horario do trade.
 
-Racional: o projeto ja usa requests como unica dependencia de HTTP. Adicionar
-python-telegram-bot introduziria uma dependencia pesada com async e event loop
-proprio, incompativel com o modelo de threading adotado. A API do Telegram e
-simples o suficiente para ser consumida diretamente.
+Racional: o objetivo do claudinho e ser um agente passivo que substitui a
+presenca constante na tela. Quando o operador age sobre uma notificacao, age
+rapidamente — abre a Binance, avalia e entra. 5 minutos e o teto realista para
+esse fluxo. Uma janela maior geraria falsos positivos (notificacoes antigas
+associadas a trades independentes).
 
-Alternativas descartadas: python-telegram-bot com polling asyncio. Descartado
-por incompatibilidade com threading e complexidade desnecessaria para o volume
-de comandos esperado.
-
----
-
-## [DEC-014] 2026-03-22 - Loop em runner.py separado dos scanners
-
-Decisao: o orquestrador de loops mora em runner.py, arquivo novo. Os scanners
-existentes (top5_hunter, cascade_market_reader, spark_market_reader) permanecem
-inalterados e continuam funcionais como scripts standalone.
-
-Racional: separacao de responsabilidades. O scanner nao deve saber que esta
-sendo chamado por um loop ou por um humano no terminal. O runner e o unico
-responsavel por scheduling, cooldown e notificacao.
-
-Alternativas descartadas: adicionar loop diretamente dentro de cada scanner via
-flag de argumento. Descartado por acoplamento desnecessario entre logica de
-mercado e logica de orquestracao.
+Alternativas descartadas: janela de 30 minutos. Descartada por ser larga demais
+e associar trades "no olho" a notificacoes distantes no tempo.
 
 ---
 
-## [DEC-015] 2026-03-22 - Cooldown em memoria, sem persistencia
+## [DEC-019] 2026-03-23 - Classificacao binaria de trades: claudinho vs olho
 
-Decisao: o estado de cooldown por ativo e mantido em dicionario Python em
-memoria. Nao e persistido em disco nem em banco de dados nesta fase.
+Decisao: cada trade e classificado como "claudinho" (existia notificacao no
+simbolo nos 5 min anteriores) ou "olho" (sem notificacao correspondente). Nao
+existe categoria intermediaria para "confirm manual sem notificacao de loop".
 
-Racional: o runner e um processo continuo. Reinicializacoes sao raras e um
-cooldown zerado apos restart e aceitavel — no pior caso o operador recebe uma
-notificacao duplicada. Persistencia adiciona complexidade sem beneficio
-proporcional neste estagio.
+Racional: a granularidade binaria e suficiente para o objetivo principal —
+comparar a performance dos trades guiados pelo agente com os trades por
+julgamento proprio. Adicionar uma terceira categoria (confirm manual)
+complicaria a analise sem beneficio proporcional neste estagio.
 
-Alternativas descartadas: persistir cooldown em arquivo JSON ou Supabase.
-Descartado para esta fase. Sera revisado quando o Supabase for integrado na Fase
-2b.
+Alternativas descartadas: categoria separada para "confirm manual". Descartada
+por adicionar complexidade ao cruzamento sem alterar o insight central.
+
+---
+
+## [DEC-018] 2026-03-23 - Endpoint /fapi/v1/income para historico de trades
+
+Decisao: usar GET /fapi/v1/income com incomeType=REALIZED_PNL para buscar
+historico de performance, em vez de GET /fapi/v1/userTrades.
+
+Racional: /fapi/v1/userTrades requer o parametro symbol e so cobre janelas de
+ate 7 dias por chamada, exigindo uma requisicao por simbolo operado. O endpoint
+/income retorna PnL realizado de todos os simbolos em uma unica chamada, com
+paginacao por timestamp e suporte a janelas de ate 30 dias.
+
+Alternativas descartadas: /fapi/v1/userTrades por simbolo. Descartado por
+requerer multiplas chamadas e nao cobrir periodos de 30 dias sem iteracao
+complexa.
+
+---
+
+## [DEC-017] 2026-03-23 - Supabase via REST API sem biblioteca cliente
+
+Decisao: a integracao com o Supabase e feita via requests diretamente para a
+REST API do Supabase (PostgREST), sem instalar a biblioteca supabase-py.
+
+Racional: o projeto ja usa requests como unica dependencia de HTTP. A API REST
+do Supabase e simples e bem documentada. Adicionar supabase-py introduziria
+dependencias transitivas (httpx, gotrue, realtime) sem beneficio real para o
+caso de uso atual (insert, upsert, select com filtros simples).
+
+Alternativas descartadas: supabase-py. Descartado por peso desnecessario de
+dependencias para operacoes basicas de CRUD.
 
 ---
 
@@ -71,6 +86,53 @@ ruido desnecessario fora do horario de operacao do trader.
 
 ---
 
+## [DEC-015] 2026-03-22 - Cooldown em memoria, sem persistencia
+
+Decisao: o estado de cooldown por ativo e mantido em dicionario Python em
+memoria. Nao e persistido em disco nem em banco de dados nesta fase.
+
+Racional: o runner e um processo continuo. Reinicializacoes sao raras e um
+cooldown zerado apos restart e aceitavel — no pior caso o operador recebe uma
+notificacao duplicada. Persistencia adiciona complexidade sem beneficio
+proporcional neste estagio.
+
+Alternativas descartadas: persistir cooldown em arquivo JSON ou Supabase.
+Descartado para esta fase. Sera revisado se restarts frequentes gerarem ruido.
+
+---
+
+## [DEC-014] 2026-03-22 - Loop em runner.py separado dos scanners
+
+Decisao: o orquestrador de loops mora em runner.py, arquivo novo. Os scanners
+existentes (top5_hunter, cascade_market_reader, spark_market_reader) permanecem
+inalterados e continuam funcionais como scripts standalone.
+
+Racional: separacao de responsabilidades. O scanner nao deve saber que esta
+sendo chamado por um loop ou por um humano no terminal. O runner e o unico
+responsavel por scheduling, cooldown e notificacao.
+
+Alternativas descartadas: adicionar loop diretamente dentro de cada scanner via
+flag de argumento. Descartado por acoplamento desnecessario entre logica de
+mercado e logica de orquestracao.
+
+---
+
+## [DEC-013] 2026-03-22 - Polling Telegram via requests puro
+
+Decisao: o polling do Telegram e feito diretamente via requests para a API REST
+do Telegram, sem uso da biblioteca python-telegram-bot.
+
+Racional: o projeto ja usa requests como unica dependencia de HTTP. Adicionar
+python-telegram-bot introduziria uma dependencia pesada com async e event loop
+proprio, incompativel com o modelo de threading adotado. A API do Telegram e
+simples o suficiente para ser consumida diretamente.
+
+Alternativas descartadas: python-telegram-bot com polling asyncio. Descartado
+por incompatibilidade com threading e complexidade desnecessaria para o volume
+de comandos esperado.
+
+---
+
 ## [DEC-012] 2026-03-18 - Protocolo Spark: deteccao de compressao e gatilho PAH
 
 Decisao: criar protocolo independente para capturar explosoes de ativos
@@ -85,8 +147,7 @@ Logica em tres fases: 1h + 15m: BBW no bottom 25% do historico proprio
 encostando na banda 1m: volume 3x acima da media, corpo cheio, rompimento da
 banda superior (PAH)
 
-Callback Spark: 3% se spread BB menor que 5%, 5% se maior (maior folga que o
-Cascade porque o movimento e mais explosivo e menos previsivel).
+Callback Spark: 3% se spread BB menor que 5%, 5% se maior.
 
 Alternativas descartadas: incluir esses ativos no Cascade. Descartado porque o
 Cascade busca momentum ja visivel — o Spark busca o momento antes do movimento
@@ -101,47 +162,36 @@ recovery de pelo menos 30% do minimo recente (janela de 10 velas). MACD positivo
 continua sendo aceito se ascendente.
 
 Racional: o sweet spot de entrada identificado pelo operador e o MACD subindo em
-direcao ao zero com StochRSI e TSI ja folgados pra cima. No 1m isso ja aparece
-como MACD positivo recente. Exigir MACD positivo no 5m atrasa a entrada e reduz
-o upside disponivel.
+direcao ao zero com StochRSI e TSI ja folgados pra cima. Exigir MACD positivo no
+5m atrasa a entrada e reduz o upside disponivel.
 
-Alternativas descartadas: exigir MACD positivo e ascendente no 5m. Descartado
-porque elimina entradas antes do cruzamento, que sao exatamente as de maior
-assimetria.
+Alternativas descartadas: exigir MACD positivo e ascendente no 5m.
 
 ---
 
 ## [DEC-010] 2026-03-18 - 1h reformulado como veto puro no Cascade
 
-Decisao: o filtro do 1h deixou de ser confirmacao (MA alinhada + MACD positivo)
-e passou a ser veto puro. Rejeita apenas se MA7 abaixo de MA99 (inversao
-estrutural) ou MACD claramente negativo (abaixo de 50% da media do valor
-absoluto historico). Tudo mais passa.
+Decisao: o filtro do 1h deixou de ser confirmacao e passou a ser veto puro.
+Rejeita apenas se MA7 abaixo de MA99 ou MACD claramente negativo.
 
 Racional: o 1h como confirmacao eliminava entradas validas em tendencias em
-formacao. Na pratica do operador, o 1h funciona como freio de mao — so muda de
-ideia se o grafico parecer outro ativo. Exigir alinhamento completo de MAs no 1h
-e prematuro para o estilo de entrada do Cascade.
+formacao. Na pratica funciona como freio de mao — so muda de ideia se o grafico
+parecer outro ativo.
 
 Alternativas descartadas: manter MA7 > MA25 > MA99 como requisito no 1h.
-Descartado apos validacao com IRUSDT — ativo com MA99 ainda negativa mas com
-movimento de +135% ja em andamento.
 
 ---
 
 ## [DEC-009] 2026-03-17 - Aviso de SL acima de 8%
 
-Decisao: quando o SL calculado (banda inferior BB no 5m) resultar em distancia
-acima de 8% do preco de entrada, o scanner exibe aviso e sugere teto de -8% como
-referencia. O setup nao e descartado.
+Decisao: quando o SL calculado resultar em distancia acima de 8% do preco de
+entrada, o scanner exibe aviso. O setup nao e descartado.
 
 Racional: com spreads altos de Bollinger, o SL natural pode chegar a 11% ou mais
 — tecnicamente correto mas potencialmente incompativel com a alavancagem em uso.
-O operador decide no olho se entra com o SL real da banda ou trava em 8%.
+O operador decide se entra com o SL real da banda ou trava em 8%.
 
 Alternativas descartadas: descartar automaticamente setups com SL acima de 8%.
-Descartado para nao eliminar oportunidades validas em ativos de alta
-volatilidade onde o spread largo e parte do setup.
 
 ---
 
@@ -149,16 +199,8 @@ volatilidade onde o spread largo e parte do setup.
 
 Decisao: adicionar correlacao de Pearson (janela 20 velas) entre o ativo e o BTC
 nos timeframes de 5m e 15m como camada obrigatoria do Cascade. Dois casos
-permitidos:
-
-Caso A (aligned): correlacao acima de 0.6 — ativo andando junto com BTC forte
-Caso B (independent): correlacao abaixo de 0.4 — ativo com vida propria
-
-Zona morta (entre 0.4 e 0.6) e descartada: sem sinal claro de relacao ou
-independencia, o movimento nao e confiavel para o Cascade.
-
-O filtro nao se aplica ao 1h — no macro, o BTC mascara movimentos proprios das
-altcoins e eliminaria oportunidades validas.
+permitidos: Caso A (aligned): correlacao acima de 0.6 Caso B (independent):
+correlacao abaixo de 0.4 Zona morta (0.4 a 0.6): descartada.
 
 Alternativas descartadas: correlacao unica no 1h. Descartada porque em 1h o BTC
 mascara movimentos proprios das altcoins.
@@ -168,27 +210,20 @@ mascara movimentos proprios das altcoins.
 ## [DEC-007] 2026-03-17 - StochRSI sobrecompra condicional no 15m
 
 Decisao: o limite de 80 no StochRSI do 15m e dispensado quando o 1h tem MA7
-acima de MA99. Com tendencia forte no 1h, StochRSI acima de 80 no 15m indica
-combustivel aceso, nao exaustao. O limite se aplica apenas quando o 1h nao tem
-alinhamento estrutural de MAs.
+acima de MA99. Com tendencia forte no 1h, StochRSI acima de 80 indica
+combustivel aceso, nao exaustao.
 
-Alternativas descartadas: manter limite fixo de 80 em todos os casos. Descartado
-apos validacao empirica com GRASSUSDT — ativo em momentum real com StochRSI
-acima de 80 no 15m que performou +50% na sessao.
+Alternativas descartadas: manter limite fixo de 80 em todos os casos.
 
 ---
 
 ## [DEC-006] 2026-03-17 - Fase 1 sem execucao de ordens
 
-Decisao: a Fase 1 e somente leitura. Nenhuma ordem e enviada a Binance. Nenhuma
-API key autenticada e usada.
+Decisao: a Fase 1 e somente leitura. Nenhuma ordem e enviada a Binance.
 
 Racional: antes de confiar capital a qualquer agente automatizado, e necessario
 validar que a logica de identificacao de setup esta correta e alinhada com o
 julgamento do operador.
-
-Alternativas descartadas: comecar diretamente com execucao em conta real ou
-testnet. Descartado por pular a etapa de validacao da logica de entrada.
 
 ---
 
@@ -197,11 +232,7 @@ testnet. Descartado por pular a etapa de validacao da logica de entrada.
 Decisao: os protocolos Cascade e Spark nao definem Take Profit. O trailing stop
 faz o trabalho de saida.
 
-Racional: TP fixo limita o upside em movimentos de momentum real. O trailing
-deixa o mercado definir o tamanho do lucro enquanto protege o capital acumulado.
-
-Alternativas descartadas: TP fixo entre 2% e 5%. Descartado porque impoe teto
-artificial em trades que poderiam render substancialmente mais.
+Racional: TP fixo limita o upside em movimentos de momentum real.
 
 ---
 
@@ -212,12 +243,7 @@ os top 30 e bottom 30 simbolos USDT por variacao nas ultimas 24h com volume
 minimo de $10M.
 
 Racional: os ativos com maior momentum mudam constantemente. Uma lista fixa
-perde oportunidades e carrega ativos mortos. O bottom 30 foi incluido
-deliberadamente — ativos com queda forte e reversao confirmada pelos indicadores
-representam assimetria real.
-
-Alternativas descartadas: lista fixa de 8 a 20 altcoins selecionadas
-manualmente. Descartada por ser estatica e requerer manutencao constante.
+perde oportunidades e carrega ativos mortos.
 
 ---
 
@@ -227,12 +253,8 @@ Decisao: callback de 1% se spread BB no 5m for menor que 5%, callback de 2% se
 igual ou maior que 5%.
 
 Racional: em mercados de baixa volatilidade, callback de 2% queima o trailing
-antes do movimento se completar. Em mercados de alta volatilidade, callback de
-1% e acionado por ruido normal do preco. O spread da Bollinger e o termometro de
-volatilidade mais imediato disponivel.
-
-Alternativas descartadas: callback fixo de 1% ou 2% independente do contexto.
-Descartados por nao se adaptarem ao regime de volatilidade do momento.
+antes do movimento se completar. Em alta volatilidade, callback de 1% e acionado
+por ruido normal.
 
 ---
 
@@ -241,13 +263,9 @@ Descartados por nao se adaptarem ao regime de volatilidade do momento.
 Decisao: o stop loss nao e um percentual fixo. E o preco da banda inferior da
 Bollinger no 5m no momento da entrada.
 
-Racional: um percentual fixo e arbitrario e ignora o estado atual do mercado. A
-banda inferior da Bollinger representa o limite estatistico do movimento dentro
-da volatilidade corrente — se o preco rompe abaixo dela, a tese do trade quebrou
-independentemente de qualquer percentual.
-
-Alternativas descartadas: SL fixo de 3%, 5% ou 8%. Descartados por serem
-arbitrarios e nao responsivos ao contexto do ativo no momento da entrada.
+Racional: a banda inferior representa o limite estatistico do movimento dentro
+da volatilidade corrente — se o preco rompe abaixo dela, a tese do trade
+quebrou.
 
 ---
 
@@ -256,12 +274,6 @@ arbitrarios e nao responsivos ao contexto do ativo no momento da entrada.
 Decisao: implementar um unico protocolo no MVP em vez de todos os sete
 protocolos existentes.
 
-Racional: complexidade prematura e inimiga da validacao. Um protocolo bem
-implementado e testavel e mais util do que sete implementados pela metade. O
-Cascade foi escolhido por ter as condicoes de entrada mais objetivas e
-mensuraveis entre os protocolos disponiveis.
-
-Alternativas descartadas: implementar GEM, BVE ou PBS como protocolo primario.
-Descartados porque o Cascade foi desenhado especificamente para o contexto de
-maior sucesso do operador: momentum real em altcoins com confirmacao
-multi-timeframe.
+Racional: complexidade prematura e inimiga da validacao. O Cascade foi escolhido
+por ter as condicoes de entrada mais objetivas e mensuraveis entre os protocolos
+disponiveis.

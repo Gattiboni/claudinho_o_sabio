@@ -5,6 +5,61 @@ em Keep a Changelog (https://keepachangelog.com).
 
 ---
 
+## [0.4.0] - 2026-03-23
+
+### Adicionado
+
+- src/supabase_client.py: cliente HTTP para o Supabase REST API (insert, upsert,
+  select, select_range com paginacao automatica)
+- src/binance_auth.py: assinatura HMAC SHA256 para endpoints autenticados da
+  Binance Futures
+- src/trade_fetcher.py: busca REALIZED_PNL via GET /fapi/v1/income e persiste na
+  tabela trades do Supabase
+- src/analyzer.py: analise de performance por periodo com classificacao de
+  trades por origem (claudinho vs olho)
+- Tabelas Supabase criadas: scan_results, notifications_sent, trades
+- Projeto Supabase: claudinho_o_sabio (ID: lwvkdvatmdvsogvemwcq, regiao:
+  Americas)
+
+### Fase 2b - Persistencia e Analise
+
+- Cada notificacao enviada e persistida em notifications_sent com protocol,
+  symbol, score, message_text, triggered_by
+- Cada sinal identificado pelos scanners e persistido em scan_results com
+  details_json
+- Trades buscados via API autenticada da Binance (/fapi/v1/income,
+  incomeType=REALIZED_PNL) e persistidos em trades
+- Paginacao automatica no Supabase: busca em blocos de 1000 registros ate
+  esgotar o periodo
+- Timestamp da Binance sincronizado via /fapi/v1/time para evitar erro -1021
+- Classificacao automatica de trades: cruza trades com notificacoes por simbolo
+  em janela de 5 minutos
+  - Notificacao + trade no mesmo simbolo em ate 5 min: categoria "claudinho"
+  - Trade sem notificacao correspondente: categoria "olho"
+  - Notificacao sem trade correspondente: ignorada na analise
+- KPIs calculados por categoria: total de trades, win rate, PnL bruto, PnL
+  liquido, maior ganho/perda, media ganho/perda
+- Comparativo claudinho vs olho em win rate quando ambas as categorias tem
+  trades
+
+### Comando Telegram adicionado
+
+- "Claudinho analisa": abre menu de selecao de periodo (24h / 3d / 7d / 30d),
+  busca trades da Binance, persiste no Supabase e envia relatorio completo
+
+### Variaveis de ambiente adicionadas
+
+- SUPABASE_URL: URL do projeto Supabase
+- SUPABASE_ANON_KEY: chave publica do Supabase para acesso via REST API
+
+### Deploy Railway
+
+- Regiao alterada de US East (Virginia) para EU West (Amsterdam) para resolver
+  bloqueio HTTP 451 da Binance
+- RAILPACK_START_CMD adicionado nas variaveis de ambiente do Railway
+
+---
+
 ## [0.3.0] - 2026-03-22
 
 ### Adicionado
