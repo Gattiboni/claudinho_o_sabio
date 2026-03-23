@@ -1,24 +1,23 @@
 # runner.py
 # Orquestrador principal do claudinho_o_sabio
 # Gattiboni Enterprises - claudinho_o_sabio
+#
+# Responsabilidades:
+#   - Rodar os tres scanners (top5, cascade, spark) em loops independentes
+#   - Respeitar horario de operacao automatica (seg-sex 06-23:59, dom 20-23:59)
+#   - Enviar notificacoes via Telegram quando encontrar sinais
+#   - Controlar cooldown por ativo (15 min entre notificacoes do mesmo ativo)
+#   - Responder comandos via Telegram:
+#       "Claudinho roda os protocolos" — disparo unico imediato
+#       "Claudinho mute"               — silencia notificacoes
+#       "Claudinho unmute"             — retoma notificacoes
+#       "confirm SYMBOL"               — analise pontual de ativo
+#
+# Uso: py -3.11 src/runner.py
 
 import sys
 import os
-
-# Adiciona o diretorio do runner ao sys.path
-_here = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _here)
-
-# Diagnostico: imprime o path e lista os arquivos disponiveis no container
-print(f"[DIAG] __file__    = {__file__}")
-print(f"[DIAG] _here       = {_here}")
-print(f"[DIAG] sys.path[0] = {sys.path[0]}")
-print(f"[DIAG] Arquivos em {_here}:")
-try:
-    for f in sorted(os.listdir(_here)):
-        print(f"[DIAG]   {f}")
-except Exception as e:
-    print(f"[DIAG] Erro ao listar: {e}")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import time
 import threading
@@ -60,10 +59,10 @@ TIMEZONE         = pytz.timezone("America/Sao_Paulo")
 # ESTADO COMPARTILHADO
 # -----------------------------------------------------------------------
 
-state_lock     = threading.Lock()
-muted          = False
-cooldown_map   = {}
-last_update_id = 0
+state_lock   = threading.Lock()
+muted        = False
+cooldown_map = {}          # {symbol: datetime} — ultimo envio por ativo
+last_update_id = 0         # controle de polling do Telegram
 
 
 # -----------------------------------------------------------------------
@@ -71,14 +70,21 @@ last_update_id = 0
 # -----------------------------------------------------------------------
 
 def within_schedule() -> bool:
+    """
+    Retorna True se o momento atual esta dentro do horario de operacao automatica:
+      Seg-Sex: 06:00 - 23:59
+      Dom:     20:00 - 23:59
+      Sab:     nunca automatico
+    """
     now     = datetime.now(TIMEZONE)
-    weekday = now.weekday()
+    weekday = now.weekday()   # 0=seg, 1=ter, ..., 5=sab, 6=dom
     hour    = now.hour
-    if weekday in (0, 1, 2, 3, 4):
+
+    if weekday in (0, 1, 2, 3, 4):   # seg a sex
         return hour >= 6
-    if weekday == 6:
+    if weekday == 6:                  # domingo
         return hour >= 20
-    return False
+    return False                      # sabado
 
 
 # -----------------------------------------------------------------------
@@ -103,6 +109,11 @@ def mark_sent(symbol: str):
 # -----------------------------------------------------------------------
 
 def notify_if_eligible(symbol: str, text: str):
+    """
+    Envia notificacao apenas se:
+      - nao estiver muted
+      - o ativo nao estiver em cooldown
+    """
     global muted
     with state_lock:
         is_muted = muted
@@ -129,7 +140,7 @@ def run_top5():
                     if text:
                         for r in results:
                             notify_if_eligible(r["symbol"], text)
-                            break
+                            break   # envia a mensagem uma vez (agrupa todos)
             except Exception as e:
                 print(f"[RUNNER] Erro no scan Top5: {e}")
         time.sleep(INTERVAL_TOP5)
@@ -168,10 +179,14 @@ def run_spark():
 
 
 # -----------------------------------------------------------------------
-# DISPARO UNICO
+# DISPARO UNICO (comando manual)
 # -----------------------------------------------------------------------
 
 def run_once():
+    """
+    Roda os tres scanners uma vez, sem verificar horario.
+    Notifica independente de cooldown (comando explicito do operador).
+    """
     global muted
     with state_lock:
         is_muted = muted
@@ -251,6 +266,9 @@ def get_updates(offset: int) -> list:
 
 
 def process_message(text: str):
+    """
+    Interpreta comandos recebidos via Telegram.
+    """
     global muted
     text = text.strip()
 
@@ -281,11 +299,19 @@ def process_message(text: str):
 
 
 def run_polling():
+    """
+    Thread de polling do Telegram. Fica em long polling continuo.
+    Processa apenas mensagens recebidas apos o inicio do runner.
+    """
     global last_update_id
+
     print("[RUNNER] Thread polling Telegram iniciada")
+
+    # Descarta mensagens antigas: busca updates sem offset para pegar o ultimo id
     updates = get_updates(offset=-1)
     if updates:
         last_update_id = updates[-1]["update_id"] + 1
+
     while True:
         updates = get_updates(offset=last_update_id)
         for update in updates:
@@ -331,6 +357,7 @@ if __name__ == "__main__":
         f"Horario automatico: seg-sex 06-23:59 | dom 20-23:59"
     )
 
+    # Mantém a thread principal viva
     try:
         while True:
             time.sleep(60)
