@@ -8,8 +8,13 @@
 #   5m  : energia e pressao (Volume + MACD + StochRSI + proximidade BB)
 #   1m  : gatilho iminente (Volume + corpo + StochRSI)
 #
-# Score maximo: 11 pontos
+# Score maximo: 12 pontos (bonus +1 se TSI + StochRSI ambos confirmados no 15m)
+# Filtro minimo: score >= 7
 # Output: top 5 ativos com maior score
+#
+# Performance: requests paralelos em duas fases
+#   Fase 1: 1h + 15m em paralelo para todos os ativos (veto + direcao)
+#   Fase 2: 5m + 1m em paralelo apenas para quem passou a fase 1
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -18,6 +23,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # -----------------------------------------------------------------------
@@ -29,8 +35,11 @@ CANDLES_LIMIT    = 100
 
 # Universo
 VOLUME_MIN_24H_USD  = 30_000_000
-CHANGE_MIN_24H_PCT  = 10.0          # abs — ativo tem que estar se movendo hoje
+CHANGE_MIN_24H_PCT  = 10.0
 EXCLUDE_SYMBOLS     = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+
+# Score minimo para aparecer no output
+SCORE_MIN = 7
 
 # Bollinger
 BB_PERIOD = 20
@@ -55,15 +64,19 @@ MA_FAST = 7
 MA_SLOW = 99
 
 # Veto 1h
-MACD_VETO_FACTOR = 0.5   # histograma abaixo de -50% da media absoluta recente = veto
+MACD_VETO_FACTOR = 0.5
 
 # Score 5m
-NEAR_BB_UPPER_PCT   = 2.0   # preco a menos de 2% da banda superior
-VOLUME_ABOVE_FACTOR = 1.2   # volume 20% acima da media
+NEAR_BB_UPPER_PCT   = 2.0
+VOLUME_ABOVE_FACTOR = 1.2
 
 # Score 1m
-VOLUME_EXPLOSION_FACTOR = 2.5   # volume 2.5x acima da media
-BODY_FULL_RATIO         = 0.5   # corpo ocupa pelo menos 50% do range
+VOLUME_EXPLOSION_FACTOR = 2.5
+BODY_FULL_RATIO         = 0.5
+
+# Paralelismo
+MAX_WORKERS_FASE1 = 20
+MAX_WORKERS_FASE2 = 10
 
 
 # -----------------------------------------------------------------------
@@ -122,6 +135,25 @@ def calc_tsi(series, fast=TSI_FAST, slow=TSI_SLOW):
     double_smooth_abs = smooth1_abs.ewm(span=fast, adjust=False).mean()
     tsi = 100 * double_smooth / (double_smooth_abs + 1e-10)
     return tsi
+
+
+# -----------------------------------------------------------------------
+# CALCULO DE INDICADORES
+# -----------------------------------------------------------------------
+
+def enrich(df):
+    if df is None or len(df) < BB_PERIOD + 10:
+        return None
+
+    df["ma_fast"]                                = calc_sma(df["close"], MA_FAST)
+    df["ma_slow"]                                = calc_sma(df["close"], MA_SLOW)
+    df["bb_upper"], df["bb_mid"], df["bb_lower"] = calc_bbands(df["close"])
+    _, _, df["macd_hist"]                        = calc_macd(df["close"])
+    df["stoch_k"], _                             = calc_stochrsi(df["close"])
+    df["tsi"]                                    = calc_tsi(df["close"])
+    df["vol_ma20"]                               = df["volume"].rolling(20).mean()
+
+    return df
 
 
 # -----------------------------------------------------------------------
@@ -200,25 +232,6 @@ def get_candles(symbol, interval, limit=CANDLES_LIMIT):
 
 
 # -----------------------------------------------------------------------
-# CALCULO DE INDICADORES POR TIMEFRAME
-# -----------------------------------------------------------------------
-
-def enrich(df):
-    if df is None or len(df) < BB_PERIOD + 10:
-        return None
-
-    df["ma_fast"]     = calc_sma(df["close"], MA_FAST)
-    df["ma_slow"]     = calc_sma(df["close"], MA_SLOW)
-    df["bb_upper"], df["bb_mid"], df["bb_lower"] = calc_bbands(df["close"])
-    _, _, df["macd_hist"] = calc_macd(df["close"])
-    df["stoch_k"], _  = calc_stochrsi(df["close"])
-    df["tsi"]         = calc_tsi(df["close"])
-    df["vol_ma20"]    = df["volume"].rolling(20).mean()
-
-    return df
-
-
-# -----------------------------------------------------------------------
 # VETO 1H
 # -----------------------------------------------------------------------
 
@@ -251,33 +264,28 @@ def score_15m(df):
     score = 0
     detail = {}
 
-    # BB inclinando pra cima
     bb_rising = last["bb_upper"] > df["bb_upper"].iloc[-5] and last["bb_lower"] > df["bb_lower"].iloc[-5]
     if bb_rising:
         score += 1
     detail["bb_rising"] = bb_rising
 
-    # TSI positivo
     tsi_ok = not pd.isna(last["tsi"]) and last["tsi"] > 0
     if tsi_ok:
         score += 1
     detail["tsi_positive"] = tsi_ok
 
-    # StochRSI > 50 e subindo
     stoch_ok = last["stoch_k"] > 50 and last["stoch_k"] > prev["stoch_k"]
     if stoch_ok:
         score += 1
     detail["stoch_ok"] = stoch_ok
     detail["stoch_k"]  = round(last["stoch_k"], 1)
 
-    # MACD histograma > 0 e subindo
     macd_ok = last["macd_hist"] > 0 and last["macd_hist"] > prev["macd_hist"]
     if macd_ok:
         score += 1
     detail["macd_ok"]   = macd_ok
     detail["macd_hist"] = round(float(last["macd_hist"]), 6)
 
-    # Bonus: TSI + StochRSI juntos confirmados — dupla confirmacao de forca
     double_confirm = tsi_ok and stoch_ok
     if double_confirm:
         score += 1
@@ -299,26 +307,22 @@ def score_5m(df):
     score = 0
     detail = {}
 
-    # Volume acima da media
     vol_ok = last["volume"] > last["vol_ma20"] * VOLUME_ABOVE_FACTOR
     if vol_ok:
         score += 1
     detail["volume_ok"] = vol_ok
 
-    # MACD histograma subindo
     macd_ok = last["macd_hist"] > prev["macd_hist"]
     if macd_ok:
         score += 1
     detail["macd_rising"] = macd_ok
 
-    # StochRSI > 50 e subindo
     stoch_ok = last["stoch_k"] > 50 and last["stoch_k"] > prev["stoch_k"]
     if stoch_ok:
         score += 1
     detail["stoch_ok"] = stoch_ok
     detail["stoch_k"]  = round(last["stoch_k"], 1)
 
-    # Preco proximo da banda superior (a menos de 2%)
     dist = (last["bb_upper"] - last["close"]) / last["bb_upper"] * 100
     near_upper = dist <= NEAR_BB_UPPER_PCT
     if near_upper:
@@ -342,23 +346,20 @@ def score_1m(df):
     score = 0
     detail = {}
 
-    # Volume explodindo
     vol_exp = last["volume"] >= last["vol_ma20"] * VOLUME_EXPLOSION_FACTOR
     if vol_exp:
         score += 1
     detail["vol_explosion"] = vol_exp
     detail["vol_ratio"]     = round(last["volume"] / (last["vol_ma20"] + 1e-10), 2)
 
-    # Corpo cheio
     candle_range = last["high"] - last["low"]
     body_ratio   = abs(last["close"] - last["open"]) / (candle_range + 1e-10)
     full_body    = body_ratio >= BODY_FULL_RATIO
     if full_body:
         score += 1
-    detail["full_body"]   = full_body
-    detail["body_ratio"]  = round(body_ratio, 2)
+    detail["full_body"]  = full_body
+    detail["body_ratio"] = round(body_ratio, 2)
 
-    # StochRSI > 50 e subindo
     stoch_ok = last["stoch_k"] > 50 and last["stoch_k"] > prev["stoch_k"]
     if stoch_ok:
         score += 1
@@ -369,53 +370,95 @@ def score_1m(df):
 
 
 # -----------------------------------------------------------------------
+# WORKERS PARALELOS
+# -----------------------------------------------------------------------
+
+def fetch_fase1(item):
+    """Busca 1h e 15m. Retorna candidato enriquecido ou None se vetado."""
+    symbol = item["symbol"]
+    df_1h  = enrich(get_candles(symbol, "1h"))
+    vetoed, _ = check_veto_1h(df_1h)
+    if vetoed:
+        return None
+
+    df_15m   = enrich(get_candles(symbol, "15m"))
+    s15, d15 = score_15m(df_15m)
+
+    return {
+        "item":       item,
+        "score_15m":  s15,
+        "detail_15m": d15,
+    }
+
+
+def fetch_fase2(candidate):
+    """Busca 5m e 1m para quem passou a fase 1."""
+    symbol = candidate["item"]["symbol"]
+    df_5m  = enrich(get_candles(symbol, "5m"))
+    df_1m  = enrich(get_candles(symbol, "1m"))
+
+    s5, d5 = score_5m(df_5m)
+    s1, d1 = score_1m(df_1m)
+
+    entry_price = float(df_5m.iloc[-1]["close"]) if df_5m is not None else None
+
+    return {
+        "symbol":      symbol,
+        "change_pct":  candidate["item"]["change_pct"],
+        "volume_24h":  candidate["item"]["volume_24h"],
+        "score":       candidate["score_15m"] + s5 + s1,
+        "score_15m":   candidate["score_15m"],
+        "score_5m":    s5,
+        "score_1m":    s1,
+        "detail_15m":  candidate["detail_15m"],
+        "detail_5m":   d5,
+        "detail_1m":   d1,
+        "entry_price": entry_price,
+    }
+
+
+# -----------------------------------------------------------------------
 # SCANNER PRINCIPAL
 # -----------------------------------------------------------------------
 
 def scan_top5():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Top 5 Hunter iniciando...")
+    t_start = datetime.now()
+    print(f"\n[{t_start.strftime('%H:%M:%S')}] Top 5 Hunter iniciando...")
 
     universe = get_universe()
     print(f"[INFO] {len(universe)} ativos no universo (vol > $30M, variacao > 10%)")
 
+    if not universe:
+        return []
+
+    # Fase 1: veto 1h + score 15m em paralelo
+    fase1_passed = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_FASE1) as executor:
+        futures = {executor.submit(fetch_fase1, item): item for item in universe}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                fase1_passed.append(result)
+
+    print(f"[INFO] {len(fase1_passed)} ativos passaram o veto do 1h")
+
+    if not fase1_passed:
+        return []
+
+    # Fase 2: score 5m + 1m em paralelo apenas para quem passou
     results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_FASE2) as executor:
+        futures = {executor.submit(fetch_fase2, candidate): candidate for candidate in fase1_passed}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                results.append(result)
 
-    for item in universe:
-        symbol = item["symbol"]
-        change = item["change_pct"]
-
-        df_1h = enrich(get_candles(symbol, "1h"))
-        vetoed, veto_reason = check_veto_1h(df_1h)
-        if vetoed:
-            continue
-
-        df_15m = enrich(get_candles(symbol, "15m"))
-        df_5m  = enrich(get_candles(symbol, "5m"))
-        df_1m  = enrich(get_candles(symbol, "1m"))
-
-        s15, d15 = score_15m(df_15m)
-        s5,  d5  = score_5m(df_5m)
-        s1,  d1  = score_1m(df_1m)
-
-        total = s15 + s5 + s1
-
-        entry_price = float(df_5m.iloc[-1]["close"]) if df_5m is not None else None
-
-        results.append({
-            "symbol":       symbol,
-            "change_pct":   change,
-            "volume_24h":   item["volume_24h"],
-            "score":        total,
-            "score_15m":    s15,
-            "score_5m":     s5,
-            "score_1m":     s1,
-            "detail_15m":   d15,
-            "detail_5m":    d5,
-            "detail_1m":    d1,
-            "entry_price":  entry_price,
-        })
+    elapsed = (datetime.now() - t_start).total_seconds()
+    print(f"[INFO] Scan completo em {elapsed:.1f}s")
 
     results.sort(key=lambda x: x["score"], reverse=True)
+    results = [r for r in results if r["score"] >= SCORE_MIN]
     top5 = results[:5]
 
     return top5
@@ -427,7 +470,7 @@ def scan_top5():
 
 def print_top5(results):
     if not results:
-        print("\nNenhum ativo passou o veto do 1h. Mercado sem estrutura.")
+        print(f"\nNenhum ativo atingiu score minimo de {SCORE_MIN} neste momento.")
         return
 
     print(f"\n{'=' * 60}")
@@ -436,7 +479,7 @@ def print_top5(results):
     print(f"{'=' * 60}")
 
     for i, r in enumerate(results, 1):
-        double = r['detail_15m'].get('double_confirm')
+        double     = r['detail_15m'].get('double_confirm')
         double_tag = "  [DUPLA CONFIRMACAO TSI+STOCH]" if double else ""
         print(f"\n#{i} {r['symbol']}  |  {r['change_pct']:+.2f}% 24h  |  Score: {r['score']}/12{double_tag}")
         print(f"    Entrada:  {r['entry_price']}")

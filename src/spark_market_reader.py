@@ -6,6 +6,9 @@
 #   1h + 15m : compressao de Bollinger (energia acumulando)
 #   5m       : pre-sinal (tremidas com corpo, volume crescendo)
 #   1m       : gatilho PAH (volume explode, corpo cheio, rompimento)
+#
+# Performance: fase 1 (1h + 15m) em paralelo para todos os ativos
+#   Fases 2 e 3 permanecem sequenciais (universo ja reduzido)
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -13,7 +16,9 @@ warnings.filterwarnings("ignore")
 import requests
 import pandas as pd
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from spark_universe import get_spark_universe
+
 
 # -----------------------------------------------------------------------
 # CONFIGURACAO
@@ -24,30 +29,27 @@ DEBUG = True
 BINANCE_BASE_URL = "https://fapi.binance.com"
 CANDLES_LIMIT    = 100
 
-# Bollinger
 BB_PERIOD = 20
 BB_STD    = 2.0
 
-# Compressao: percentil maximo do BBW para considerar comprimido
-BBW_PERCENTILE_THRESHOLD = 25   # bottom 25% do historico proprio do ativo
+BBW_PERCENTILE_THRESHOLD = 25
 
-# Pre-sinal no 5m
-PRESIGNAL_CANDLES     = 3       # quantas velas consecutivas analisar
-BODY_RATIO_MIN        = 0.4     # corpo minimo como % do range da vela (nao doji)
-VOLUME_CREEP_FACTOR   = 1.1     # volume levemente acima da media (10%+)
+PRESIGNAL_CANDLES     = 3
+BODY_RATIO_MIN        = 0.4
+VOLUME_CREEP_FACTOR   = 1.1
 
-# Gatilho no 1m
-VOLUME_EXPLOSION_FACTOR = 3.0   # volume 3x acima da media recente
-BODY_FULL_RATIO         = 0.6   # corpo cheio: close perto do high
+VOLUME_EXPLOSION_FACTOR = 3.0
+BODY_FULL_RATIO         = 0.6
 
-# Trailing Spark
-BB_SPREAD_LOW_THRESHOLD  = 5.0
-CALLBACK_LOW             = 3.0  # mercado comprimido que acabou de explodir
-CALLBACK_HIGH            = 5.0  # explosao em mercado mais volatil
+BB_SPREAD_LOW_THRESHOLD = 5.0
+CALLBACK_LOW            = 3.0
+CALLBACK_HIGH           = 5.0
+
+MAX_WORKERS_FASE1 = 20
 
 
 # -----------------------------------------------------------------------
-# INDICADORES NATIVOS (sem pandas_ta)
+# INDICADORES NATIVOS
 # -----------------------------------------------------------------------
 
 def calc_bbands(series, period=BB_PERIOD, std=BB_STD):
@@ -85,17 +87,17 @@ def get_candles(symbol, interval, limit=CANDLES_LIMIT):
 
 
 # -----------------------------------------------------------------------
-# CALCULO DE INDICADORES
+# INDICADORES
 # -----------------------------------------------------------------------
 
 def add_bbands(df):
     if df is None or len(df) < BB_PERIOD + 5:
         return None
     upper, mid, lower = calc_bbands(df["close"])
-    df["bb_upper"] = upper
-    df["bb_mid"]   = mid
-    df["bb_lower"] = lower
-    df["bb_width"] = (upper - lower) / mid * 100
+    df["bb_upper"]    = upper
+    df["bb_mid"]      = mid
+    df["bb_lower"]    = lower
+    df["bb_width"]    = (upper - lower) / mid * 100
     df["volume_ma20"] = df["volume"].rolling(20).mean()
     return df
 
@@ -163,12 +165,12 @@ def check_presignal(df_5m):
 
     passed  = bodies_ok and closes_up and vol_creep and vol_no_exp and near_upper
     details = {
-        "bodies_ok":          bodies_ok,
-        "closes_up":          closes_up,
-        "vol_creep":          vol_creep,
-        "vol_no_explosion":   vol_no_exp,
-        "near_upper_bb":      near_upper,
-        "dist_to_upper_pct":  round(dist_to_upper, 2),
+        "bodies_ok":         bodies_ok,
+        "closes_up":         closes_up,
+        "vol_creep":         vol_creep,
+        "vol_no_explosion":  vol_no_exp,
+        "near_upper_bb":     near_upper,
+        "dist_to_upper_pct": round(dist_to_upper, 2),
     }
     return passed, details
 
@@ -192,10 +194,10 @@ def check_trigger(df_1m):
 
     breakout = last["close"] > last["bb_upper"]
 
-    spread    = (last["bb_upper"] - last["bb_lower"]) / last["bb_lower"] * 100
-    sl_level  = last["bb_lower"]
-    sl_pct    = round((last["close"] - last["bb_lower"]) / last["close"] * 100, 2)
-    callback  = CALLBACK_HIGH if spread >= BB_SPREAD_LOW_THRESHOLD else CALLBACK_LOW
+    spread   = (last["bb_upper"] - last["bb_lower"]) / last["bb_lower"] * 100
+    sl_level = last["bb_lower"]
+    sl_pct   = round((last["close"] - last["bb_lower"]) / last["close"] * 100, 2)
+    callback = CALLBACK_HIGH if spread >= BB_SPREAD_LOW_THRESHOLD else CALLBACK_LOW
 
     passed  = vol_explosion and full_body and breakout
     details = {
@@ -215,35 +217,63 @@ def check_trigger(df_1m):
 
 
 # -----------------------------------------------------------------------
+# WORKER PARALELO - FASE 1
+# -----------------------------------------------------------------------
+
+def fetch_compression(item):
+    """Busca 1h e 15m e verifica compressao. Retorna item enriquecido ou None."""
+    symbol = item["symbol"]
+    df_1h  = get_candles(symbol, "1h")
+    df_15m = get_candles(symbol, "15m")
+
+    ok_comp, details_comp = check_compression(df_1h, df_15m)
+
+    if not ok_comp:
+        if DEBUG:
+            motivos = []
+            if not details_comp.get("compressed_1h"):
+                motivos.append(f"1h:BBW_pct={details_comp.get('bbw_percentile_1h', '?')}%")
+            if not details_comp.get("compressed_15m"):
+                motivos.append(f"15m:BBW_pct={details_comp.get('bbw_percentile_15m', '?')}%")
+            print(f"  [SKIP-COMP]  {symbol:20s} | {item['change_pct']:+6.2f}% | {', '.join(motivos)}")
+        return None
+
+    return {
+        "item":         item,
+        "details_comp": details_comp,
+    }
+
+
+# -----------------------------------------------------------------------
 # SCANNER PRINCIPAL
 # -----------------------------------------------------------------------
 
 def scan_spark():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Iniciando scan Spark...")
+    t_start = datetime.now()
+    print(f"\n[{t_start.strftime('%H:%M:%S')}] Iniciando scan Spark...")
 
     universe = get_spark_universe()
     print(f"[INFO] {len(universe)} candidatos no universo Spark (esquecidos, sem movimento)")
 
+    # Fase 1: compressao 1h + 15m em paralelo
+    comprimidos = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_FASE1) as executor:
+        futures = {executor.submit(fetch_compression, item): item for item in universe}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                comprimidos.append(result)
+
+    print(f"[INFO] {len(comprimidos)} ativos comprimidos encontrados")
+
     sparks = []
 
-    for item in universe:
-        symbol = item["symbol"]
-        change = item["change_pct"]
-
-        df_1h  = get_candles(symbol, "1h")
-        df_15m = get_candles(symbol, "15m")
-
-        ok_comp, details_comp = check_compression(df_1h, df_15m)
-
-        if not ok_comp:
-            if DEBUG:
-                motivos = []
-                if not details_comp.get("compressed_1h"):
-                    motivos.append(f"1h:BBW_pct={details_comp.get('bbw_percentile_1h', '?')}%")
-                if not details_comp.get("compressed_15m"):
-                    motivos.append(f"15m:BBW_pct={details_comp.get('bbw_percentile_15m', '?')}%")
-                print(f"  [SKIP-COMP]  {symbol:20s} | {change:+6.2f}% | {', '.join(motivos)}")
-            continue
+    # Fases 2 e 3: sequenciais sobre universo ja reduzido
+    for candidate in comprimidos:
+        item         = candidate["item"]
+        symbol       = item["symbol"]
+        change       = item["change_pct"]
+        details_comp = candidate["details_comp"]
 
         df_5m = get_candles(symbol, "5m")
         ok_pre, details_pre = check_presignal(df_5m)
@@ -276,6 +306,9 @@ def scan_spark():
         }
         sparks.append(spark)
         print(f"  [SPARK]      {symbol:20s} | {change:+6.2f}% | PAH DETECTADO")
+
+    elapsed = (datetime.now() - t_start).total_seconds()
+    print(f"[INFO] Scan completo em {elapsed:.1f}s")
 
     return sparks
 
