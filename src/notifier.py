@@ -4,7 +4,7 @@
 #
 # Responsabilidades:
 #   - Enviar mensagens de texto para o chat configurado
-#   - Formatar output dos scanners (top5, cascade, spark, confirm)
+#   - Formatar output dos scanners (top5, cascade, spark, confirm, roar)
 #   - Persistir notificacoes enviadas no Supabase (notifications_sent)
 #   - Persistir sinais identificados no Supabase (scan_results)
 #
@@ -131,7 +131,6 @@ def format_top5(results: list, triggered_by: str = "loop") -> str:
             f"Stoch={r['detail_1m'].get('stoch_k')}"
         )
 
-        # Persiste scan
         _persist_scan(
             protocol = "top5",
             symbol   = r["symbol"],
@@ -150,7 +149,6 @@ def format_top5(results: list, triggered_by: str = "loop") -> str:
     lines.append("Score e sinal, nao certeza. Protocolo define a entrada.")
     text = "\n".join(lines)
 
-    # Persiste notificacao (uma por grupo top5)
     _persist_notification(
         protocol     = "top5",
         symbol       = results[0]["symbol"],
@@ -203,7 +201,6 @@ def format_cascade(setups: list, triggered_by: str = "loop") -> str:
 
         text = "\n".join(lines)
 
-        # Persiste scan e notificacao por ativo
         _persist_scan(
             protocol = "cascade",
             symbol   = s["symbol"],
@@ -295,6 +292,97 @@ def format_spark(sparks: list, triggered_by: str = "loop") -> str:
         )
 
     return "\n".join(lines)
+
+
+def format_roar(results: list, triggered_by: str = "loop") -> str:
+    """
+    Formata o output de scan_roar() para envio no Telegram.
+    Persiste scan_results e notifications_sent no Supabase.
+    """
+    if not results:
+        return ""
+
+    ts    = datetime.now().strftime("%H:%M:%S")
+    lines = [f"[ROAR HUNTER] {ts}"]
+    lines.append("Dormentes com momentum em recuperacao — alvo 5-7% em 2-4h")
+
+    for i, r in enumerate(results, 1):
+        d1h = r["detail_1h"]
+        d15 = r["detail_15m"]
+        d5  = r["detail_5m"]
+
+        sl_warn  = "  [ATENCAO: SL acima de 8%]" if d1h.get("sl_pct", 0) > 8 else ""
+        roar     = d1h.get("roar_detail", {})
+        roar_tag = ""
+        if d1h.get("roar_bonus"):
+            roar_tag = f"  [ROAR: +{roar.get('best_pct')}% em {roar.get('avg_candles_max')}h hist]"
+
+        lines.append("")
+        lines.append(
+            f"#{i} {r['symbol']}  |  {r['change_pct']:+.2f}% 24h  |  "
+            f"Score: {r['score']}/13{roar_tag}"
+        )
+        lines.append(f"Entrada:     {r['entry_price']}")
+        sl_level_val = d1h.get("sl_level")
+        sl_level_str = f"{sl_level_val:.4f}" if sl_level_val is not None else "n/a"
+        lines.append(
+            f"SL (BB 1h):  {sl_level_str}  "
+            f"(-{d1h.get('sl_pct', 'n/a')}%){sl_warn}"
+        )
+        lines.append(f"Trailing CB: 2%")
+        lines.append(
+            f"Vol 24h: ${r['volume_24h']:,.0f}  |  "
+            f"Crescimento: +{r['vol_growth']}%"
+        )
+        lines.append(
+            f"1h [{r['score_1h']}/8]: "
+            f"Spread={d1h.get('bb_spread_pct')}%  "
+            f"BB={d1h.get('bb_rising')}  "
+            f"Close={d1h.get('close_position_pct')}%range  "
+            f"MACD={d1h.get('macd_positive')}  "
+            f"TSI={d1h.get('tsi_ok')}({d1h.get('tsi_val')})  "
+            f"Stoch={d1h.get('stoch_k')}"
+        )
+        lines.append(
+            f"15m [{r['score_15m']}/3]: "
+            f"BB={d15.get('bb_rising')}  "
+            f"TSI={d15.get('tsi_ok')}  "
+            f"MACD={d15.get('macd_ok')}"
+        )
+        lines.append(
+            f"5m  [{r['score_5m']}/2]: "
+            f"Vol={d5.get('volume_ok')}({d5.get('vol_ratio')}x)  "
+            f"MACD={d5.get('macd_ok')}"
+        )
+
+        _persist_scan(
+            protocol = "roar",
+            symbol   = r["symbol"],
+            score    = r["score"],
+            details  = {
+                "change_pct":  r["change_pct"],
+                "vol_growth":  r["vol_growth"],
+                "entry_price": r["entry_price"],
+                "detail_1h":   d1h,
+                "detail_15m":  d15,
+                "detail_5m":   d5,
+            },
+            notified = True,
+        )
+
+    lines.append("")
+    lines.append("Score e sinal, nao certeza. Protocolo define a entrada.")
+    text = "\n".join(lines)
+
+    _persist_notification(
+        protocol     = "roar",
+        symbol       = results[0]["symbol"],
+        score        = results[0]["score"],
+        message_text = text,
+        triggered_by = triggered_by,
+    )
+
+    return text
 
 
 def format_confirm(symbol: str, result: dict, triggered_by: str = "manual") -> str:

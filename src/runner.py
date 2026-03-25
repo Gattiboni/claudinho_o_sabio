@@ -3,7 +3,7 @@
 # Gattiboni Enterprises - claudinho_o_sabio
 #
 # Responsabilidades:
-#   - Rodar os tres scanners (top5, cascade, spark) em loops independentes
+#   - Rodar os quatro scanners (top5, cascade, spark, roar) em loops independentes
 #   - Respeitar horario de operacao automatica (seg-sex 06-23:59, dom 20-23:59)
 #   - Enviar notificacoes via Telegram quando encontrar sinais
 #   - Persistir scans e notificacoes no Supabase via notifier
@@ -29,15 +29,17 @@ import pytz
 from dotenv import load_dotenv
 import requests
 
-from top5_hunter           import scan_top5 # pyright: ignore[reportMissingImports]
+from top5_hunter           import scan_top5
 from cascade_market_reader import scan_market
 from spark_market_reader   import scan_spark
+from roar_hunter           import scan_roar
 from confirm               import analyze_to_dict
 from notifier              import (
     send_message,
     format_top5,
     format_cascade,
     format_spark,
+    format_roar,
     format_confirm,
 )
 
@@ -53,11 +55,11 @@ TELEGRAM_BASE_URL  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 INTERVAL_TOP5    = int(os.getenv("SCAN_INTERVAL_TOP5",    30)) * 60
 INTERVAL_CASCADE = int(os.getenv("SCAN_INTERVAL_CASCADE", 30)) * 60
 INTERVAL_SPARK   = int(os.getenv("SCAN_INTERVAL_SPARK",   15)) * 60
+INTERVAL_ROAR    = int(os.getenv("SCAN_INTERVAL_ROAR",    30)) * 60
 
 COOLDOWN_MINUTES = 15
 TIMEZONE         = pytz.timezone("America/Sao_Paulo")
 
-# Janela de correlacao entre notificacao e trade (minutos)
 NOTIFICATION_TRADE_WINDOW = 5
 
 # -----------------------------------------------------------------------
@@ -69,7 +71,6 @@ muted          = False
 cooldown_map   = {}
 last_update_id = 0
 
-# Controle de menu de analise: aguardando selecao de periodo
 awaiting_analysis = False
 
 
@@ -174,6 +175,23 @@ def run_spark():
         time.sleep(INTERVAL_SPARK)
 
 
+def run_roar():
+    print(f"[RUNNER] Thread Roar iniciada (intervalo: {INTERVAL_ROAR // 60} min)")
+    while True:
+        if within_schedule():
+            try:
+                results = scan_roar()
+                if results:
+                    text = format_roar(results, triggered_by="loop")
+                    if text:
+                        for r in results:
+                            notify_if_eligible(r["symbol"], text)
+                            break
+            except Exception as e:
+                print(f"[RUNNER] Erro no scan Roar: {e}")
+        time.sleep(INTERVAL_ROAR)
+
+
 # -----------------------------------------------------------------------
 # DISPARO UNICO
 # -----------------------------------------------------------------------
@@ -224,6 +242,19 @@ def run_once():
             send_message("[SPARK] Nenhum Spark detectado agora.")
     except Exception as e:
         send_message(f"[SPARK] Erro no scan: {e}")
+
+    try:
+        roars = scan_roar()
+        if roars:
+            text = format_roar(roars, triggered_by="manual")
+            if text:
+                send_message(text)
+                for r in roars:
+                    mark_sent(r["symbol"])
+        else:
+            send_message("[ROAR] Nenhum dormentes qualificado agora.")
+    except Exception as e:
+        send_message(f"[ROAR] Erro no scan: {e}")
 
 
 # -----------------------------------------------------------------------
@@ -297,7 +328,6 @@ def process_message(text: str):
     text_stripped = text.strip()
     text_lower    = text_stripped.lower()
 
-    # Menu de analise aberto — proxima mensagem e a selecao de periodo
     with state_lock:
         waiting = awaiting_analysis
 
@@ -310,7 +340,6 @@ def process_message(text: str):
             ).start()
             return
         else:
-            # Nao era uma selecao — reseta o menu e processa normalmente
             with state_lock:
                 awaiting_analysis = False
 
@@ -382,7 +411,12 @@ if __name__ == "__main__":
     print(f"[RUNNER] Iniciando claudinho_o_sabio — {datetime.now(TIMEZONE).strftime('%d/%m/%Y %H:%M:%S')} (Brasilia)")
     print(f"[RUNNER] Horario automatico: seg-sex 06-23:59 | dom 20-23:59 | sab: somente sob demanda")
     print(f"[RUNNER] Cooldown por ativo: {COOLDOWN_MINUTES} min")
-    print(f"[RUNNER] Intervalos: Top5={INTERVAL_TOP5 // 60}min | Cascade={INTERVAL_CASCADE // 60}min | Spark={INTERVAL_SPARK // 60}min")
+    print(
+        f"[RUNNER] Intervalos: Top5={INTERVAL_TOP5 // 60}min | "
+        f"Cascade={INTERVAL_CASCADE // 60}min | "
+        f"Spark={INTERVAL_SPARK // 60}min | "
+        f"Roar={INTERVAL_ROAR // 60}min"
+    )
 
     if not TELEGRAM_BOT_TOKEN:
         print("[RUNNER] ATENCAO: TELEGRAM_BOT_TOKEN nao configurado. Polling e notificacoes desativados.")
@@ -391,6 +425,7 @@ if __name__ == "__main__":
         threading.Thread(target=run_top5,    daemon=True, name="top5"),
         threading.Thread(target=run_cascade,  daemon=True, name="cascade"),
         threading.Thread(target=run_spark,    daemon=True, name="spark"),
+        threading.Thread(target=run_roar,     daemon=True, name="roar"),
     ]
 
     if TELEGRAM_BOT_TOKEN:
@@ -401,7 +436,8 @@ if __name__ == "__main__":
 
     send_message(
         f"claudinho_o_sabio online — {datetime.now(TIMEZONE).strftime('%d/%m/%Y %H:%M:%S')}\n"
-        f"Intervalos: Top5={INTERVAL_TOP5 // 60}min | Cascade={INTERVAL_CASCADE // 60}min | Spark={INTERVAL_SPARK // 60}min\n"
+        f"Intervalos: Top5={INTERVAL_TOP5 // 60}min | Cascade={INTERVAL_CASCADE // 60}min | "
+        f"Spark={INTERVAL_SPARK // 60}min | Roar={INTERVAL_ROAR // 60}min\n"
         f"Horario automatico: seg-sex 06-23:59 | dom 20-23:59"
     )
 
