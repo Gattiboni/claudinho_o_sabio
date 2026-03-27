@@ -32,17 +32,20 @@ You receive data about a losing open position and propose exactly 2 concrete man
 Hard rules:
 - Never suggest closing and rebuying at a lower price as a standalone move. That is position-biased thinking and destroys capital through fees and slippage.
 - The only valid "rebuy" scenario is: keep the position open OR sell 50% now to reduce exposure, identify the structural bottom (BB lower of 15m or 5m), and place a limit BUY order at that level with 2x to 10x the original entry size. The thesis is that if price reaches that bottom and bounces 2-3%, the combined position exits at breakeven or profit. This is calculated bottom fishing, not panic selling and hoping.
-- Never suggest a new SL that is tighter (closer to current price) than the existing SL. If the operator already has a SL set, any new SL must be at least as wide. You have the current SL price in the data — use it.
-- SL is always set at a Bollinger Band lower of a specific timeframe — never arbitrary
-- If BB spread > 5%, trailing callback = 2%. If <= 5%, callback = 1%
+- SL direction rule — this is critical and must never be violated:
+    - For LONG positions: SL price must be BELOW entry price. A wider SL means a LOWER number. A tighter SL means a HIGHER number. If the current SL is 0.097, a wider SL would be 0.094 (lower). A value of 0.099 would be TIGHTER, not wider, and is forbidden.
+    - For SHORT positions: SL price must be ABOVE entry price. A wider SL means a HIGHER number. A tighter SL means a LOWER number.
+    - Never suggest a new SL that is tighter than the existing SL. The user data explicitly states the current SL price — any suggested SL must be further from entry than that value, in the correct direction for the position side.
+- SL is always set at a Bollinger Band lower (for LONG) or upper (for SHORT) of a specific timeframe — never arbitrary.
+- If BB spread > 5%, trailing callback = 2%. If <= 5%, callback = 1%.
 - Distance from lower band: price at or below lower band = potential floor. Price far above lower band = room to fall further.
 - StochRSI K < 20 = oversold, may suggest bounce. K > 80 = still has room to fall.
 - MACD ascending even if negative = momentum improving.
 - Choose the 2 most situationally relevant scenarios given the specific data:
     - Hold with existing SL unchanged, wait for recovery
     - Sell 50% now to reduce margin exposure, hold remainder with SL at 15m BB lower
-    - Extend SL to 15m BB lower and hold (only if 15m BB lower is wider than current SL)
-    - Extend SL to 5m BB lower and hold (only if 5m BB lower is wider than current SL)
+    - Extend SL to 15m BB lower and hold (only if 15m BB lower is wider than current SL per the direction rule above)
+    - Extend SL to 5m BB lower and hold (only if 5m BB lower is wider than current SL per the direction rule above)
     - Hold OR sell 50%, place limit BUY at 5m BB lower with 2x-10x original size, recalculate trailing TP from that level
     - Hold with current SL, wait for StochRSI bounce at oversold before deciding
 
@@ -63,10 +66,11 @@ Risco: [o que faz esse cenario falhar]"""
 def _build_user_prompt(pos: dict) -> str:
     d15 = pos.get("15m")
     d5  = pos.get("5m")
+    direction = pos["direction"]
 
     lines = [
         f"Symbol:           {pos['symbol']}",
-        f"Direction:        {pos['direction']}",
+        f"Direction:        {direction}",
         f"Entry price:      {pos['entry_price']}",
         f"Mark price:       {pos['mark_price']}",
         f"Price move:       {pos['raw_pct_move']:+.2f}% unleveraged (negative = against position)",
@@ -77,7 +81,14 @@ def _build_user_prompt(pos: dict) -> str:
     ]
 
     if pos.get("current_sl"):
-        lines.append(f"Current SL:       {pos['current_sl']} (-{pos['current_sl_pct']}% from entry)  <- do not suggest a tighter SL than this")
+        if direction == "LONG":
+            sl_note = "any wider SL must be a LOWER number than this"
+        else:
+            sl_note = "any wider SL must be a HIGHER number than this"
+        lines.append(
+            f"Current SL:       {pos['current_sl']} (-{pos['current_sl_pct']}% from entry)"
+            f"  <- {sl_note}"
+        )
     else:
         lines.append("Current SL:       none set")
 
@@ -85,11 +96,15 @@ def _build_user_prompt(pos: dict) -> str:
 
     if d15:
         bb = d15["bb"]
+        if direction == "LONG":
+            sl_ref = "structural SL reference for LONG — must be below current SL to be useful"
+        else:
+            sl_ref = "structural SL reference for SHORT — must be above current SL to be useful"
         lines += [
             "15m Bollinger Bands:",
             f"  Upper:         {bb['upper']}",
             f"  Middle:        {bb['middle']}",
-            f"  Lower:         {bb['lower']}   <- structural SL reference",
+            f"  Lower:         {bb['lower']}   <- {sl_ref}",
             f"  Spread:        {bb['spread_pct']}%",
             f"  Rising:        {bb['rising']}",
             f"  Dist to lower: {d15['dist_from_lower_pct']:+.2f}%  (negative = price below lower band)",
@@ -223,7 +238,10 @@ def run_rescue(symbol: str):
 
     _persist(pos, response)
 
-    sl_line = f"SL ativo: {pos['current_sl']} (-{pos['current_sl_pct']}%)" if pos.get("current_sl") else "SL ativo: nenhum"
+    sl_line = (
+        f"SL ativo: {pos['current_sl']} (-{pos['current_sl_pct']}%)"
+        if pos.get("current_sl") else "SL ativo: nenhum"
+    )
 
     header = (
         f"[E AGORA?] {pos['symbol']}\n"
