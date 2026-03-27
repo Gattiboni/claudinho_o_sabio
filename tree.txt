@@ -1,0 +1,29 @@
+claudinho_o_sabio/
+├── .env
+├── .gitignore
+├── CHANGELOG.md
+├── DECISION_LOG.md
+├── config.py
+├── pyrightconfig.json
+├── readme.md
+├── requirements.txt
+├── tree.txt
+└── src/
+    ├── __init__.py
+    ├── analyzer.py
+    ├── binance_auth.py
+    ├── cascade_market_reader.py
+    ├── confirm.py
+    ├── diag.py
+    ├── notifier.py
+    ├── position_fetcher.py
+    ├── rescue_protocol.py
+    ├── roar_hunter.py
+    ├── runner.py
+    ├── spark_market_reader.py
+    ├── spark_universe.py
+    ├── supabase_client.py
+    ├── top5_hunter.py
+    └── trade_fetcher.py
+
+Gerado em: 2026-03-27
