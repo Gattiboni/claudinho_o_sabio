@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 DEBUG = True
 
 BINANCE_BASE_URL   = "https://fapi.binance.com"
-VOLUME_MIN_24H_USD = 10_000_000
+VOLUME_MIN_24H_USD = 2_000_000
 TOP_BOTTOM_N       = 30
 CANDLES_LIMIT      = 100
 

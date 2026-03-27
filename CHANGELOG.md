@@ -5,6 +5,83 @@ em Keep a Changelog (https://keepachangelog.com).
 
 ---
 
+## [0.5.2] - 2026-03-26
+
+### Modificado
+
+- src/analyzer.py: classificacao de trades expandida para quatro categorias
+- src/analyzer.py: correcao de timezone no header do relatorio
+  (America/Sao_Paulo)
+- src/analyzer.py: todos os valores numericos com 2 casas decimais
+- src/analyzer.py: busca de saldo USDT via API autenticada da Binance em tempo
+  real
+- src/analyzer.py: tabela do relatorio em formato monospace com colunas
+  alinhadas
+- src/notifier.py: send_message_pre adicionada para envio de relatorios em HTML
+  pre
+- src/notifier.py: format_confirm persiste em notifications_sent independente do
+  score
+- src/runner.py: handle_analysis usa send_message_pre para entrega tabular no
+  Telegram
+
+---
+
+## [0.5.1] - 2026-03-26
+
+### Modificado
+
+- src/top5_hunter.py: VOLUME_MIN_24H_USD reduzido de $30M para $2M
+- src/cascade_market_reader.py: VOLUME_MIN_24H_USD reduzido de $10M para $2M
+- src/roar_hunter.py: VOLUME_MIN_24H_USD reduzido de $30M para $2M
+- src/spark_universe.py: VOLUME_MIN_24H_USD reduzido de $1M para $2M
+  (VOLUME_MAX_24H_USD preservado em $50M)
+
+---
+
+## [0.5.0] - 2026-03-26
+
+### Adicionado
+
+- src/roar_hunter.py: scanner do protocolo Roar Hunter
+
+### Protocolo Roar Hunter (v1)
+
+- Universo: perpetuos USDT-M com volume > $30M e variacao 24h <= +3% — ativos
+  que caíram ou ficaram parados, excluindo quem ja subiu
+- Filtro de vitalidade: soma das ultimas 3 velas de 1h >= 20% acima da soma das
+  3 velas anteriores — descarta ativos sem acumulo real de volume recente
+- 1h como coracao do protocolo (nao veto): BB spread > 10%, ambas as bandas
+  apontando pra cima, close abaixo do BB mid, MACD histograma positivo, TSI
+  positivo e ascendente, StochRSI K >= 40 e ascendente
+- Veto direto: StochRSI cruzado pra baixo no 1h — movimento de exaustao
+- Veto direto: close acima de 70% do range BB no 1h — movimento ja consumido
+- Analise historica de ciclos MACD nos 100 candles do 1h: identifica cruzamentos
+  validos (histograma positivo por >= 3 candles consecutivos), mede amplitude
+  maxima nos 20 candles seguintes, concede bonus +1 se algum ciclo atingiu >= 7%
+  e exibe o historico no output como campo informativo
+- 15m como confirmacao de direcao: BB ascendente, TSI positivo e ascendente,
+  MACD positivo
+- 5m como confirmacao de energia: volume acima da MA20 por fator 1.2x, MACD
+  positivo e ascendente
+- SL: banda inferior da BB do 1h
+- Trailing CB: 2% fixo (horizonte de swing de 2-4h)
+- Score maximo: 13 pontos (7 no 1h + 1 bonus historico + 3 no 15m + 2 no 5m)
+- Score minimo para output: 9
+- Output: top 5 ativos em ordem de score
+
+### Modificado
+
+- src/notifier.py: format_roar() adicionado, persistencia em scan_results e
+  notifications_sent para o protocolo Roar
+- src/runner.py: thread run_roar adicionada, Roar incluido no run_once, env var
+  SCAN_INTERVAL_ROAR (default 30 min), mensagem de startup atualizada
+
+### Variaveis de ambiente adicionadas
+
+- SCAN_INTERVAL_ROAR: intervalo do loop Roar em minutos (default 30)
+
+---
+
 ## [0.4.0] - 2026-03-23
 
 ### Adicionado

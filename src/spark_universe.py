@@ -5,7 +5,7 @@
 import requests
 
 BINANCE_BASE_URL = "https://fapi.binance.com"
-VOLUME_MIN_24H_USD = 1_000_000   # Minimo para ter liquidez real
+VOLUME_MIN_24H_USD = 2_000_000   # Minimo para ter liquidez real
 VOLUME_MAX_24H_USD = 50_000_000  # Teto: acima disso ja e major, nao esquecido
 CHANGE_EXCLUDE_PCT = 8.0         # Exclui quem ja se moveu mais de 8% nas 24h
 

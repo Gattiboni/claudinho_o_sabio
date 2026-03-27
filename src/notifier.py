@@ -53,6 +53,31 @@ def send_message(text: str) -> bool:
         return False
 
 
+def send_message_pre(text: str) -> bool:
+    """
+    Envia mensagem em bloco <pre> (monospace) via HTML parse_mode.
+    Usar para relatorios tabulares como o Claudinho analisa.
+    Retorna True se enviou com sucesso, False caso contrario.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[NOTIFIER] Telegram nao configurado. Mensagem suprimida:\n{text}")
+        return False
+
+    url     = f"{TELEGRAM_BASE_URL}/sendMessage"
+    payload = {
+        "chat_id":    TELEGRAM_CHAT_ID,
+        "text":       f"<pre>{text}</pre>",
+        "parse_mode": "HTML",
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[NOTIFIER] Falha ao enviar mensagem pre: {e}")
+        return False
+
+
 def _persist_notification(protocol: str, symbol: str, score: int,
                            message_text: str, triggered_by: str):
     """
@@ -460,13 +485,12 @@ def format_confirm(symbol: str, result: dict, triggered_by: str = "manual") -> s
         notified = confirmed,
     )
 
-    if confirmed:
-        _persist_notification(
-            protocol     = "confirm",
-            symbol       = symbol,
-            score        = total,
-            message_text = text,
-            triggered_by = triggered_by,
-        )
+    _persist_notification(
+        protocol     = "confirm",
+        symbol       = symbol,
+        score        = total,
+        message_text = text,
+        triggered_by = triggered_by,
+    )
 
     return text

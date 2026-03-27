@@ -16,7 +16,11 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytz
+
 from supabase_client import select_range
+
+TIMEZONE = pytz.timezone("America/Sao_Paulo")
 
 
 # -----------------------------------------------------------------------
@@ -30,12 +34,21 @@ NOTIFICATION_WINDOW_MINUTES = 5
 # CLASSIFICACAO
 # -----------------------------------------------------------------------
 
-def _classify_trades(trades: list, notifications: list) -> list:
+def _classify_trades(trades: list, notifications: list, scan_results: list) -> list:
     """
-    Classifica cada trade como 'claudinho' ou 'olho'.
-    Um trade e 'claudinho' se existe notificacao para o mesmo simbolo
-    nos 5 minutos anteriores ao trade.
+    Classifica cada trade em uma de quatro categorias:
+      - claudinho_confirm : notificacao de confirm nos 5 min anteriores ao trade
+      - claudinho_loop    : notificacao de loop nos 10 min anteriores (sem confirm no simbolo)
+      - ignorou_veto      : veto em scan_results nos 10 min anteriores (sem nenhum sinal)
+      - olho              : nenhuma correspondencia
+    ig.veto e subconjunto de olho para fins de agregacao.
     """
+    WINDOW_CONFIRM = timedelta(minutes=5)
+    WINDOW_LOOP    = timedelta(minutes=10)
+    WINDOW_VETO    = timedelta(minutes=10)
+
+    LOOP_PROTOCOLS = {"top5", "cascade", "spark", "roar"}
+
     classified = []
 
     for trade in trades:
@@ -46,20 +59,51 @@ def _classify_trades(trades: list, notifications: list) -> list:
 
             symbol   = trade["symbol"]
             category = "olho"
+            ignorou_veto = False
 
-            window_start = trade_time - timedelta(minutes=NOTIFICATION_WINDOW_MINUTES)
-
+            # 1. Procura confirm nos 5 min anteriores (prioridade maxima)
             for notif in notifications:
                 if notif["symbol"] != symbol:
                     continue
-                notif_time = datetime.fromisoformat(notif["created_at"])
-                if notif_time.tzinfo is None:
-                    notif_time = notif_time.replace(tzinfo=timezone.utc)
-                if window_start <= notif_time <= trade_time:
-                    category = "claudinho"
+                if notif.get("protocol") != "confirm":
+                    continue
+                ntime = datetime.fromisoformat(notif["created_at"])
+                if ntime.tzinfo is None:
+                    ntime = ntime.replace(tzinfo=timezone.utc)
+                if trade_time - WINDOW_CONFIRM <= ntime <= trade_time:
+                    category = "claudinho_confirm"
                     break
 
-            classified.append({**trade, "category": category})
+            # 2. Se nao encontrou confirm, procura loop nos 10 min anteriores
+            if category == "olho":
+                for notif in notifications:
+                    if notif["symbol"] != symbol:
+                        continue
+                    if notif.get("protocol") not in LOOP_PROTOCOLS:
+                        continue
+                    ntime = datetime.fromisoformat(notif["created_at"])
+                    if ntime.tzinfo is None:
+                        ntime = ntime.replace(tzinfo=timezone.utc)
+                    if trade_time - WINDOW_LOOP <= ntime <= trade_time:
+                        category = "claudinho_loop"
+                        break
+
+            # 3. Se continua olho, verifica se ignorou veto nos 10 min anteriores
+            if category == "olho":
+                for sr in scan_results:
+                    if sr["symbol"] != symbol:
+                        continue
+                    if not sr.get("details_json", {}).get("vetoed"):
+                        continue
+                    srtime = datetime.fromisoformat(sr["created_at"])
+                    if srtime.tzinfo is None:
+                        srtime = srtime.replace(tzinfo=timezone.utc)
+                    if trade_time - WINDOW_VETO <= srtime <= trade_time:
+                        ignorou_veto = True
+                        break
+
+            classified.append({**trade, "category": category, "ignorou_veto": ignorou_veto})
+
         except Exception as e:
             print(f"[ANALYZER] Erro ao classificar trade: {e} | {trade}")
 
@@ -103,12 +147,12 @@ def _calc_kpis(trades: list) -> dict:
         "winners":     len(winners),
         "losers":      len(losers),
         "win_rate":    round(win_rate, 1),
-        "pnl_bruto":   round(pnl_bruto, 4),
-        "pnl_liquido": round(pnl_liquido, 4),
-        "maior_ganho": round(max(winners), 4) if winners else 0.0,
-        "maior_perda": round(min(losers),  4) if losers  else 0.0,
-        "media_ganho": round(sum(winners) / len(winners), 4) if winners else 0.0,
-        "media_perda": round(sum(losers)  / len(losers),  4) if losers  else 0.0,
+        "pnl_bruto":   round(pnl_bruto, 2),
+        "pnl_liquido": round(pnl_liquido, 2),
+        "maior_ganho": round(max(winners), 2) if winners else 0.0,
+        "maior_perda": round(min(losers),  2) if losers  else 0.0,
+        "media_ganho": round(sum(winners) / len(winners), 2) if winners else 0.0,
+        "media_perda": round(sum(losers)  / len(losers),  2) if losers  else 0.0,
     }
 
 
@@ -116,50 +160,70 @@ def _calc_kpis(trades: list) -> dict:
 # FORMATACAO DO RELATORIO
 # -----------------------------------------------------------------------
 
-def _format_kpis(label: str, kpis: dict) -> list:
-    """Formata bloco de KPIs para uma categoria."""
-    if kpis["total"] == 0:
-        return [f"{label}: nenhum trade no periodo."]
-
-    lines = [
-        f"{label}",
-        f"  Trades:      {kpis['total']}  ({kpis['winners']}W / {kpis['losers']}L)",
-        f"  Win rate:    {kpis['win_rate']}%",
-        f"  PnL bruto:   {kpis['pnl_bruto']:+.4f} USDT",
-        f"  PnL liquido: {kpis['pnl_liquido']:+.4f} USDT",
-        f"  Maior ganho: {kpis['maior_ganho']:+.4f} USDT",
-        f"  Maior perda: {kpis['maior_perda']:+.4f} USDT",
-        f"  Media ganho: {kpis['media_ganho']:+.4f} USDT",
-        f"  Media perda: {kpis['media_perda']:+.4f} USDT",
-    ]
-    return lines
-
-
 def _format_report(days: int, all_kpis: dict, claudinho_kpis: dict,
-                   olho_kpis: dict, total_trades: int) -> str:
-    """Monta o relatorio completo."""
-    ts    = datetime.now().strftime("%d/%m/%Y %H:%M")
-    label = f"ultimas 24h" if days == 1 else f"ultimos {days} dias"
+                   ignorou_kpis: dict, olho_kpis: dict,
+                   total_trades: int, carteira: str) -> str:
+    ts    = datetime.now(TIMEZONE).strftime("%d/%m/%Y %H:%M")
+    label = "ultimas 24h" if days == 1 else f"ultimos {days} dias"
+
+    def fmt_pnl(v):
+        return f"{v:+.2f}" if v != 0 else "0.00"
+
+    def fmt_pct(v):
+        return f"{v:.1f}%"
+
+    def col(val, width):
+        return str(val).rjust(width)
+
+    w = 11
+
+    header = f"{'':16}{col('Geral', w)}{col('Claudinho', w)}{col('Ig.Veto', w)}{col('Olho', w)}"
+    sep    = "-" * (16 + w * 4)
+
+    def row(label, g, c, iv, o):
+        return f"{label:<16}{col(g, w)}{col(c, w)}{col(iv, w)}{col(o, w)}"
+
+    def kval(kpis, key, fmt_fn):
+        return fmt_fn(kpis[key]) if kpis["total"] > 0 else "-"
+
+    g  = all_kpis
+    c  = claudinho_kpis
+    iv = ignorou_kpis
+    o  = olho_kpis
 
     lines = [
         f"[ANALISE] {ts}",
         f"Periodo: {label}",
-        f"Total de registros: {total_trades}",
+        f"Carteira: {carteira} USDT",
         "",
+        header,
+        sep,
+        row("Trades",
+            g["total"],
+            c["total"] if c["total"] > 0 else "-",
+            iv["total"] if iv["total"] > 0 else "-",
+            o["total"] if o["total"] > 0 else "-"),
+        row("W / L",
+            f"{g['winners']}W/{g['losers']}L",
+            f"{c['winners']}W/{c['losers']}L" if c["total"] > 0 else "-",
+            f"{iv['winners']}W/{iv['losers']}L" if iv["total"] > 0 else "-",
+            f"{o['winners']}W/{o['losers']}L" if o["total"] > 0 else "-"),
+        row("Win rate",     kval(g,"win_rate",fmt_pct),    kval(c,"win_rate",fmt_pct),    kval(iv,"win_rate",fmt_pct),    kval(o,"win_rate",fmt_pct)),
+        row("PnL bruto",    kval(g,"pnl_bruto",fmt_pnl),   kval(c,"pnl_bruto",fmt_pnl),   kval(iv,"pnl_bruto",fmt_pnl),   kval(o,"pnl_bruto",fmt_pnl)),
+        row("Maior ganho",  kval(g,"maior_ganho",fmt_pnl), kval(c,"maior_ganho",fmt_pnl), kval(iv,"maior_ganho",fmt_pnl), kval(o,"maior_ganho",fmt_pnl)),
+        row("Maior perda",  kval(g,"maior_perda",fmt_pnl), kval(c,"maior_perda",fmt_pnl), kval(iv,"maior_perda",fmt_pnl), kval(o,"maior_perda",fmt_pnl)),
+        row("Media ganho",  kval(g,"media_ganho",fmt_pnl), kval(c,"media_ganho",fmt_pnl), kval(iv,"media_ganho",fmt_pnl), kval(o,"media_ganho",fmt_pnl)),
+        row("Media perda",  kval(g,"media_perda",fmt_pnl), kval(c,"media_perda",fmt_pnl), kval(iv,"media_perda",fmt_pnl), kval(o,"media_perda",fmt_pnl)),
     ]
 
-    lines += _format_kpis("Geral", all_kpis)
-    lines.append("")
-    lines += _format_kpis("Com sinal do Claudinho", claudinho_kpis)
-    lines.append("")
-    lines += _format_kpis("No olho (sem sinal)", olho_kpis)
-
-    # Comparativo so aparece se ambas as categorias tiverem trades
-    if claudinho_kpis["total"] > 0 and olho_kpis["total"] > 0:
-        diff = claudinho_kpis["win_rate"] - olho_kpis["win_rate"]
+    if c["total"] > 0 and o["total"] > 0:
+        diff     = c["win_rate"] - o["win_rate"]
         diff_str = f"+{diff:.1f}%" if diff >= 0 else f"{diff:.1f}%"
         lines.append("")
-        lines.append(f"Claudinho vs olho: {diff_str} de diferenca em win rate")
+        lines.append(f"Claudinho vs olho: {diff_str} em win rate")
+
+    lines.append("")
+    lines.append("Ig.Veto = subconjunto de Olho. Entrou contra o veto do 1h.")
 
     return "\n".join(lines)
 
@@ -169,12 +233,8 @@ def _format_report(days: int, all_kpis: dict, claudinho_kpis: dict,
 # -----------------------------------------------------------------------
 
 def run_analysis(days: int) -> str:
-    """
-    Executa a analise completa para os ultimos N dias.
-    Retorna o relatorio formatado para envio no Telegram.
-    """
-    now      = datetime.now(timezone.utc)
-    start    = now - timedelta(days=days)
+    now       = datetime.now(timezone.utc)
+    start     = now - timedelta(days=days)
     start_iso = start.isoformat()
     end_iso   = now.isoformat()
 
@@ -184,21 +244,39 @@ def run_analysis(days: int) -> str:
     if not trades:
         return f"Nenhum trade encontrado nos ultimos {'24h' if days == 1 else str(days) + ' dias'}."
 
-    print(f"[ANALYZER] {len(trades)} trades encontrados. Buscando notificacoes...")
+    print(f"[ANALYZER] {len(trades)} trades encontrados. Buscando notificacoes e scan_results...")
     notifications = select_range(
         "notifications_sent", "created_at", start_iso, end_iso, limit=5000
     )
-    print(f"[ANALYZER] {len(notifications)} notificacoes encontradas.")
+    scan_results_raw = select_range(
+        "scan_results", "created_at", start_iso, end_iso, limit=5000
+    )
+    print(f"[ANALYZER] {len(notifications)} notificacoes | {len(scan_results_raw)} scan_results.")
 
-    classified      = _classify_trades(trades, notifications)
-    claudinho_trades = [t for t in classified if t["category"] == "claudinho"]
+    classified       = _classify_trades(trades, notifications, scan_results_raw)
+    claudinho_trades = [t for t in classified if t["category"].startswith("claudinho")]
+    ignorou_trades   = [t for t in classified if t["ignorou_veto"]]
     olho_trades      = [t for t in classified if t["category"] == "olho"]
 
     all_kpis       = _calc_kpis(classified)
     claudinho_kpis = _calc_kpis(claudinho_trades)
+    ignorou_kpis   = _calc_kpis(ignorou_trades)
     olho_kpis      = _calc_kpis(olho_trades)
 
-    report = _format_report(days, all_kpis, claudinho_kpis, olho_kpis, len(trades))
+    # Busca saldo USDT na Binance
+    carteira = "indisponivel"
+    try:
+        from binance_auth import signed_get
+        balances = signed_get("/fapi/v2/balance", {})
+        if balances:
+            for asset in balances:
+                if asset.get("asset") == "USDT":
+                    carteira = f"{float(asset['availableBalance']):.2f}"
+                    break
+    except Exception as e:
+        print(f"[ANALYZER] Erro ao buscar saldo: {e}")
+
+    report = _format_report(days, all_kpis, claudinho_kpis, ignorou_kpis, olho_kpis, len(trades), carteira)
     return report
 
 
