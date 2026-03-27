@@ -5,6 +5,53 @@ o que foi decidido, por que, e quais alternativas foram descartadas.
 
 ---
 
+## [DEC-026] 2026-03-27 - Protocolo E Agora: Claude API para gestao de posicao em baixa
+
+Decisao: criar protocolo de gestao de risco acionado manualmente via Telegram
+que busca todos os dados da posicao aberta e chama a Claude API para propor
+exatamente 2 cenarios situacionais.
+
+Racional: o operador ja geria posicoes perdedoras no olho com eficiencia, mas
+sem protocolo — decisoes inconsistentes dependendo do estado emocional do
+momento. Formalizar em 2 cenarios forcados elimina o viés de inacao (ficar
+segurando sem plano) e o de pânico (fechar tudo sem avaliacao). O modelo recebe
+dados reais de mercado (BB levels, MACD, StochRSI) e escolhe os 2 cenarios mais
+relevantes do leque — nao uma lista fixa — o que torna a resposta situacional em
+vez de generica.
+
+O prompt e em ingles para qualidade de raciocinio do modelo. O output e
+instrucido em portugues para uso direto no chat.
+
+Alternativas descartadas: lista fixa de cenarios pre-calculados sem IA.
+Descartada porque ignora o contexto especifico do mercado no momento — o mesmo
+ativo com o mesmo PnL pode ter tratamentos completamente diferentes dependendo
+de onde esta o preco em relacao as Bollinger Bands. Resposta puramente
+deterministica sem Claude API. Descartada por incapacidade de ponderar multiplos
+fatores simultaneamente e escolher os 2 cenarios mais relevantes.
+
+---
+
+## [DEC-027] 2026-03-27 - Janela de 60 minutos para classificacao rescue no analyzer
+
+Decisao: trades fechados ou abertos em ate 60 minutos apos um pedido E agora
+para o mesmo simbolo sao classificados na categoria rescue, com prioridade
+abaixo de claudinho_confirm e claudinho_loop.
+
+Racional: o rescue nao e um sinal de entrada imediata — e uma analise de
+situacao. O operador pode levar alguns minutos para avaliar os cenarios, decidir
+e executar. Uma janela curta (5 ou 10 minutos) perderia a maioria dos trades
+influenciados pelo protocolo. 60 minutos cobre o horizonte realista de acao pos-
+consulta sem contaminar trades completamente independentes. Rescue e subconjunto
+conceitualmente distinto de olho: o operador consultou o agente antes de agir,
+mesmo que nao tenha seguido o conselho à risca.
+
+Alternativas descartadas: janela de 10 minutos, igual ao claudinho_loop.
+Descartada porque o rescue envolve leitura, avaliacao e execucao deliberada —
+nao entrada reflexa. Janela de 120 minutos. Descartada por contaminar trades
+subsequentes sem relacao com o pedido original.
+
+---
+
 ## [DEC-023] 2026-03-26 - Classificacao de trades em quatro categorias
 
 Decisao: expandir a classificacao de trades de binaria (claudinho/olho) para

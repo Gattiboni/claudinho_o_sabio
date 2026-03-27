@@ -5,6 +5,49 @@ em Keep a Changelog (https://keepachangelog.com).
 
 ---
 
+## [0.6.0] - 2026-03-27
+
+### Adicionado
+
+- src/position_fetcher.py: busca posicao aberta na Binance Futures via
+  /fapi/v2/positionRisk e calcula contexto de mercado (BB, MACD, StochRSI em 15m
+  e 5m) para uso pelo rescue_protocol
+- src/rescue_protocol.py: protocolo E Agora — acionado por comando Telegram,
+  busca posicao aberta, chama Claude API e entrega 2 cenarios de gestao de risco
+  diretamente no chat
+
+### Modificado
+
+- src/analyzer.py: classificacao de trades expandida com categoria rescue —
+  trades fechados ou abertos em ate 60 minutos apos pedido E agora
+- src/analyzer.py: relatorio com cinco colunas (Geral, Claudinho, Rescue,
+  Ig.Veto, Olho) e comparativo Rescue vs Olho em win rate
+- src/runner.py: handle_rescue adicionado, comando "Claudinho e agora? SYMBOL"
+  registrado em process_message
+
+### Protocolo E Agora (v1)
+
+- Acionado por: "Claudinho e agora? SYMBOL"
+- Busca posicao aberta via /fapi/v2/positionRisk: entry, mark, PnL, leverage,
+  margin, liquidation
+- Calcula BB (upper/middle/lower/spread/rising), MACD e StochRSI em 15m e 5m
+  nativamente via pandas/numpy — sem novas dependencias
+- Monta prompt estruturado com todos os dados e chama Claude API
+  (claude-sonnet-4-20250514, max_tokens=700)
+- Resposta em portugues: 2 cenarios situacionais com acao (precos especificos),
+  racional e risco
+- Leque de cenarios avaliados pelo modelo: fechar imediatamente, fechar 50% e
+  segurar, estender SL para BB lower do 5m, estender SL para BB lower do 15m,
+  fechar e recomprar no fundo com 2x-5x o tamanho, aguardar bounce no oversold
+- Persiste em scan_results (dados da posicao no momento) e notifications_sent
+  com protocol="rescue" para rastreamento no analyzer
+
+### Variaveis de ambiente adicionadas
+
+- ANTHROPIC_API_KEY: chave da API Anthropic para chamadas do rescue_protocol
+
+---
+
 ## [0.5.2] - 2026-03-26
 
 ### Modificado

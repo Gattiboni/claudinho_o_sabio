@@ -1,3 +1,52 @@
+# runner_rescue_patch.py
+# Patch para runner.py — Protocolo E Agora
+# Gattiboni Enterprises - claudinho_o_sabio
+#
+# Instrucoes de merge:
+#   1. Adicionar import no bloco de imports do runner
+#   2. Adicionar handle_rescue() apos handle_confirm()
+#   3. Adicionar branch em process_message() antes do ultimo return
+
+
+# -----------------------------------------------------------------------
+# 1. IMPORT — adicionar junto aos demais imports do runner
+# -----------------------------------------------------------------------
+
+# from rescue_protocol import run_rescue
+
+
+# -----------------------------------------------------------------------
+# 2. HANDLER — adicionar apos handle_confirm()
+# -----------------------------------------------------------------------
+
+# def handle_rescue(symbol: str):
+#     """
+#     Busca posicao aberta para o symbol e envia 2 cenarios de gestao de risco.
+#     """
+#     threading.Thread(target=run_rescue, args=(symbol,), daemon=True).start()
+
+
+# -----------------------------------------------------------------------
+# 3. BRANCH em process_message() — adicionar apos o bloco "confirm SYMBOL"
+# -----------------------------------------------------------------------
+
+# Texto completo do novo branch:
+#
+#     if text_lower.startswith("claudinho e agora? "):
+#         parts = text_stripped.split(maxsplit=3)
+#         if len(parts) == 4:
+#             symbol = parts[3].strip()
+#             handle_rescue(symbol)
+#         else:
+#             send_message("Uso: Claudinho e agora? SYMBOL  (ex: Claudinho e agora? SOLUSDT)")
+#         return
+
+
+# -----------------------------------------------------------------------
+# ARQUIVO COMPLETO — runner.py com patch aplicado para referencia
+# -----------------------------------------------------------------------
+
+RUNNER_WITH_PATCH = '''
 # runner.py
 # Orquestrador principal do claudinho_o_sabio
 # Gattiboni Enterprises - claudinho_o_sabio
@@ -14,6 +63,7 @@
 #       "Claudinho unmute"             — retoma notificacoes
 #       "Claudinho analisa"            — abre menu de analise de trades
 #       "confirm SYMBOL"               — analise pontual de ativo
+#       "Claudinho e agora? SYMBOL"    — gestao de posicao em baixa (2 cenarios)
 #
 # Uso: py -3.11 src/runner.py
 
@@ -34,6 +84,7 @@ from cascade_market_reader import scan_market
 from spark_market_reader   import scan_spark
 from roar_hunter           import scan_roar
 from confirm               import analyze_to_dict
+from rescue_protocol       import run_rescue
 from notifier              import (
     send_message,
     format_top5,
@@ -201,7 +252,7 @@ def run_once():
     with state_lock:
         is_muted = muted
     if is_muted:
-        send_message("Claudinho esta em mute. Use 'Claudinho unmute' para reativar.")
+        send_message("Claudinho esta em mute. Use \'Claudinho unmute\' para reativar.")
         return
 
     send_message("Rodando os protocolos agora...")
@@ -271,14 +322,21 @@ def handle_confirm(symbol: str):
 
 
 # -----------------------------------------------------------------------
+# HANDLER DE RESCUE
+# -----------------------------------------------------------------------
+
+def handle_rescue(symbol: str):
+    """
+    Busca posicao aberta para o symbol e envia 2 cenarios de gestao de risco.
+    """
+    threading.Thread(target=run_rescue, args=(symbol,), daemon=True).start()
+
+
+# -----------------------------------------------------------------------
 # HANDLER DE ANALISE
 # -----------------------------------------------------------------------
 
 def handle_analysis(period_text: str):
-    """
-    Busca trades do periodo, calcula KPIs e envia relatorio.
-    Importacao local para evitar dependencia circular no startup.
-    """
     from trade_fetcher import fetch_and_store
     from analyzer      import run_analysis
 
@@ -350,7 +408,7 @@ def process_message(text: str):
     if text_lower == "claudinho mute":
         with state_lock:
             muted = True
-        send_message("Mute ativado. Notificacoes suspensas ate 'Claudinho unmute'.")
+        send_message("Mute ativado. Notificacoes suspensas ate \'Claudinho unmute\'.")
         return
 
     if text_lower == "claudinho unmute":
@@ -363,10 +421,10 @@ def process_message(text: str):
         with state_lock:
             awaiting_analysis = True
         send_message(
-            "Selecione o periodo de analise:\n"
-            "1 - Ultimas 24h\n"
-            "2 - Ultimos 3 dias\n"
-            "3 - Ultimos 7 dias\n"
+            "Selecione o periodo de analise:\\n"
+            "1 - Ultimas 24h\\n"
+            "2 - Ultimos 3 dias\\n"
+            "3 - Ultimos 7 dias\\n"
             "4 - Ultimos 30 dias"
         )
         return
@@ -378,6 +436,15 @@ def process_message(text: str):
             threading.Thread(target=handle_confirm, args=(symbol,), daemon=True).start()
         else:
             send_message("Uso: confirm SYMBOL  (ex: confirm SOLUSDT)")
+        return
+
+    if text_lower.startswith("claudinho e agora? "):
+        parts = text_stripped.split(maxsplit=3)
+        if len(parts) == 4:
+            symbol = parts[3].strip()
+            handle_rescue(symbol)
+        else:
+            send_message("Uso: Claudinho e agora? SYMBOL  (ex: Claudinho e agora? SOLUSDT)")
         return
 
 
@@ -408,7 +475,7 @@ def run_polling():
 # -----------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(f"[RUNNER] Iniciando claudinho_o_sabio — {datetime.now(TIMEZONE).strftime('%d/%m/%Y %H:%M:%S')} (Brasilia)")
+    print(f"[RUNNER] Iniciando claudinho_o_sabio — {datetime.now(TIMEZONE).strftime(\'%d/%m/%Y %H:%M:%S\')} (Brasilia)")
     print(f"[RUNNER] Horario automatico: seg-sex 06-23:59 | dom 20-23:59 | sab: somente sob demanda")
     print(f"[RUNNER] Cooldown por ativo: {COOLDOWN_MINUTES} min")
     print(
@@ -435,9 +502,9 @@ if __name__ == "__main__":
         t.start()
 
     send_message(
-        f"claudinho_o_sabio online — {datetime.now(TIMEZONE).strftime('%d/%m/%Y %H:%M:%S')}\n"
+        f"claudinho_o_sabio online — {datetime.now(TIMEZONE).strftime(\'%d/%m/%Y %H:%M:%S\')}\\n"
         f"Intervalos: Top5={INTERVAL_TOP5 // 60}min | Cascade={INTERVAL_CASCADE // 60}min | "
-        f"Spark={INTERVAL_SPARK // 60}min | Roar={INTERVAL_ROAR // 60}min\n"
+        f"Spark={INTERVAL_SPARK // 60}min | Roar={INTERVAL_ROAR // 60}min\\n"
         f"Horario automatico: seg-sex 06-23:59 | dom 20-23:59"
     )
 
@@ -445,4 +512,5 @@ if __name__ == "__main__":
         while True:
             time.sleep(60)
     except KeyboardInterrupt:
-        print("\n[RUNNER] Encerrando.")
+        print("\\n[RUNNER] Encerrando.")
+'''
