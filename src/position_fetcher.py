@@ -46,6 +46,26 @@ def _fetch_klines(symbol: str, interval: str) -> pd.DataFrame | None:
         return None
 
 
+def _fetch_current_sl(symbol: str) -> float | None:
+    """
+    Busca o stop price da ordem de SL ativa para o symbol.
+    Retorna None se nao houver ordem de stop aberta.
+    """
+    try:
+        orders = signed_get("/fapi/v1/openOrders", {"symbol": symbol})
+        if not orders:
+            return None
+        for order in orders:
+            if order.get("type") in ("STOP_MARKET", "STOP") and order.get("reduceOnly"):
+                stop_price = float(order.get("stopPrice", 0))
+                if stop_price > 0:
+                    return stop_price
+        return None
+    except Exception as e:
+        print(f"[POSITION_FETCHER] Erro ao buscar SL ativo: {e}")
+        return None
+
+
 def _calc_bb(close: pd.Series, period: int = 20, std: float = 2.0) -> dict:
     middle    = close.rolling(period).mean()
     deviation = close.rolling(period).std()
@@ -132,6 +152,12 @@ def get_open_position(symbol: str) -> dict | None:
     if direction == "SHORT":
         raw_pct_move = -raw_pct_move
 
+    # SL atual (ordem de stop ativa, se existir)
+    current_sl = _fetch_current_sl(symbol)
+    current_sl_pct = None
+    if current_sl:
+        current_sl_pct = abs(current_sl - entry_price) / entry_price * 100
+
     context = {}
     for label, interval in [("15m", "15m"), ("5m", "5m")]:
         df = _fetch_klines(symbol, interval)
@@ -151,18 +177,20 @@ def get_open_position(symbol: str) -> dict | None:
         }
 
     return {
-        "symbol":         symbol,
-        "direction":      direction,
-        "entry_price":    entry_price,
-        "mark_price":     mark_price,
-        "unrealized_pnl": round(unrealized_pnl, 2),
-        "pnl_pct_margin": round(pnl_pct_margin, 2),
-        "raw_pct_move":   round(raw_pct_move, 2),
-        "leverage":       leverage,
-        "liq_price":      liq_price,
-        "margin_type":    margin_type,
-        "margin_used":    round(margin_used, 2),
-        "size_usdt":      round(size_usdt, 2),
-        "15m":            context.get("15m"),
-        "5m":             context.get("5m"),
+        "symbol":           symbol,
+        "direction":        direction,
+        "entry_price":      entry_price,
+        "mark_price":       mark_price,
+        "unrealized_pnl":   round(unrealized_pnl, 2),
+        "pnl_pct_margin":   round(pnl_pct_margin, 2),
+        "raw_pct_move":     round(raw_pct_move, 2),
+        "leverage":         leverage,
+        "liq_price":        liq_price,
+        "margin_type":      margin_type,
+        "margin_used":      round(margin_used, 2),
+        "size_usdt":        round(size_usdt, 2),
+        "current_sl":       current_sl,
+        "current_sl_pct":   round(current_sl_pct, 2) if current_sl_pct else None,
+        "15m":              context.get("15m"),
+        "5m":               context.get("5m"),
     }

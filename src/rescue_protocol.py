@@ -2,7 +2,7 @@
 # Protocolo de gestao de posicao em baixa via Claude API
 # Gattiboni Enterprises - claudinho_o_sabio
 #
-# Acionado por: "Claudinho e agora? SYMBOL"
+# Acionado por: "rescue SYMBOL"
 # Fluxo: busca posicao aberta -> contexto de mercado -> Claude API -> 2 cenarios via Telegram
 # Persistencia: scan_results (dados da posicao) + notifications_sent (para cruzamento no analyzer)
 
@@ -30,19 +30,21 @@ SYSTEM_PROMPT = """You are a disciplined risk manager for Binance USDT-M perpetu
 You receive data about a losing open position and propose exactly 2 concrete management scenarios.
 
 Hard rules:
-- Never suggest adding margin, increasing size, or averaging down
+- Never suggest closing and rebuying at a lower price as a standalone move. That is position-biased thinking and destroys capital through fees and slippage.
+- The only valid "rebuy" scenario is: keep the position open OR sell 50% now to reduce exposure, identify the structural bottom (BB lower of 15m or 5m), and place a limit BUY order at that level with 2x to 10x the original entry size. The thesis is that if price reaches that bottom and bounces 2-3%, the combined position exits at breakeven or profit. This is calculated bottom fishing, not panic selling and hoping.
+- Never suggest a new SL that is tighter (closer to current price) than the existing SL. If the operator already has a SL set, any new SL must be at least as wide. You have the current SL price in the data — use it.
 - SL is always set at a Bollinger Band lower of a specific timeframe — never arbitrary
 - If BB spread > 5%, trailing callback = 2%. If <= 5%, callback = 1%
-- Distance from lower band is a key signal: price at or below lower band = potential floor, price far above = room to fall further
-- StochRSI K < 20 = oversold, may suggest bounce. K > 80 = still has room to fall
-- MACD ascending even if negative = momentum improving
+- Distance from lower band: price at or below lower band = potential floor. Price far above lower band = room to fall further.
+- StochRSI K < 20 = oversold, may suggest bounce. K > 80 = still has room to fall.
+- MACD ascending even if negative = momentum improving.
 - Choose the 2 most situationally relevant scenarios given the specific data:
-    - Close immediately
-    - Close 50% now, hold remainder with SL at 5m BB lower
-    - Extend SL to 5m BB lower and hold
-    - Extend SL to 15m BB lower and hold
-    - Close now, place limit rebuy at current 5m BB lower with 2x-5x size, recalculate trailing TP from that level
-    - Hold with current SL, wait for StochRSI bounce at oversold
+    - Hold with existing SL unchanged, wait for recovery
+    - Sell 50% now to reduce margin exposure, hold remainder with SL at 15m BB lower
+    - Extend SL to 15m BB lower and hold (only if 15m BB lower is wider than current SL)
+    - Extend SL to 5m BB lower and hold (only if 5m BB lower is wider than current SL)
+    - Hold OR sell 50%, place limit BUY at 5m BB lower with 2x-10x original size, recalculate trailing TP from that level
+    - Hold with current SL, wait for StochRSI bounce at oversold before deciding
 
 Respond in Brazilian Portuguese.
 Output format — follow exactly, no extra text:
@@ -63,17 +65,23 @@ def _build_user_prompt(pos: dict) -> str:
     d5  = pos.get("5m")
 
     lines = [
-        f"Symbol:          {pos['symbol']}",
-        f"Direction:       {pos['direction']}",
-        f"Entry price:     {pos['entry_price']}",
-        f"Mark price:      {pos['mark_price']}",
-        f"Price move:      {pos['raw_pct_move']:+.2f}% unleveraged (negative = against position)",
-        f"Unrealized PnL:  ${pos['unrealized_pnl']} ({pos['pnl_pct_margin']:+.2f}% on margin)",
-        f"Leverage:        {pos['leverage']}x",
-        f"Margin used:     ${pos['margin_used']} ({pos['margin_type']})",
-        f"Liquidation:     {pos['liq_price']}",
-        "",
+        f"Symbol:           {pos['symbol']}",
+        f"Direction:        {pos['direction']}",
+        f"Entry price:      {pos['entry_price']}",
+        f"Mark price:       {pos['mark_price']}",
+        f"Price move:       {pos['raw_pct_move']:+.2f}% unleveraged (negative = against position)",
+        f"Unrealized PnL:   ${pos['unrealized_pnl']} ({pos['pnl_pct_margin']:+.2f}% on margin)",
+        f"Leverage:         {pos['leverage']}x",
+        f"Margin used:      ${pos['margin_used']} ({pos['margin_type']})",
+        f"Liquidation:      {pos['liq_price']}",
     ]
+
+    if pos.get("current_sl"):
+        lines.append(f"Current SL:       {pos['current_sl']} (-{pos['current_sl_pct']}% from entry)  <- do not suggest a tighter SL than this")
+    else:
+        lines.append("Current SL:       none set")
+
+    lines.append("")
 
     if d15:
         bb = d15["bb"]
@@ -98,7 +106,7 @@ def _build_user_prompt(pos: dict) -> str:
             "5m Bollinger Bands:",
             f"  Upper:         {bb['upper']}",
             f"  Middle:        {bb['middle']}",
-            f"  Lower:         {bb['lower']}   <- immediate SL reference",
+            f"  Lower:         {bb['lower']}   <- immediate SL reference / rebuy target",
             f"  Spread:        {bb['spread_pct']}%",
             f"  Rising:        {bb['rising']}",
             f"  Dist to lower: {d5['dist_from_lower_pct']:+.2f}%  (negative = price below lower band)",
@@ -118,8 +126,6 @@ def _build_user_prompt(pos: dict) -> str:
 def _persist(pos: dict, response: str):
     """
     Persiste o rescue em scan_results e notifications_sent.
-    scan_results: dados da posicao no momento do pedido (para auditoria).
-    notifications_sent: para cruzamento no analyzer (categoria rescue).
     Falha silenciosa em ambos.
     """
     try:
@@ -137,6 +143,8 @@ def _persist(pos: dict, response: str):
                 "leverage":       pos["leverage"],
                 "margin_used":    pos["margin_used"],
                 "liq_price":      pos["liq_price"],
+                "current_sl":     pos["current_sl"],
+                "current_sl_pct": pos["current_sl_pct"],
                 "bb_15m":         pos["15m"]["bb"] if pos.get("15m") else None,
                 "bb_5m":          pos["5m"]["bb"]  if pos.get("5m")  else None,
             },
@@ -215,11 +223,14 @@ def run_rescue(symbol: str):
 
     _persist(pos, response)
 
+    sl_line = f"SL ativo: {pos['current_sl']} (-{pos['current_sl_pct']}%)" if pos.get("current_sl") else "SL ativo: nenhum"
+
     header = (
         f"[E AGORA?] {pos['symbol']}\n"
         f"Entrada: {pos['entry_price']}  |  Mark: {pos['mark_price']}\n"
         f"PnL: ${pos['unrealized_pnl']} ({pos['pnl_pct_margin']:+.2f}% na margem)\n"
         f"Move: {pos['raw_pct_move']:+.2f}% sem alavancagem\n"
+        f"{sl_line}\n"
         f"---"
     )
 

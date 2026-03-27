@@ -14,7 +14,7 @@
 #       "Claudinho unmute"             — retoma notificacoes
 #       "Claudinho analisa"            — abre menu de analise de trades
 #       "confirm SYMBOL"               — analise pontual de ativo
-#       "Claudinho e agora? SYMBOL"    — gestao de posicao em baixa (2 cenarios)
+#       "rescue SYMBOL"                — gestao de posicao em baixa (2 cenarios)
 #
 # Uso: py -3.11 src/runner.py
 
@@ -277,9 +277,6 @@ def handle_confirm(symbol: str):
 # -----------------------------------------------------------------------
 
 def handle_rescue(symbol: str):
-    """
-    Busca posicao aberta para o symbol e envia 2 cenarios de gestao de risco.
-    """
     threading.Thread(target=run_rescue, args=(symbol,), daemon=True).start()
 
 
@@ -389,13 +386,13 @@ def process_message(text: str):
             send_message("Uso: confirm SYMBOL  (ex: confirm SOLUSDT)")
         return
 
-    if text_lower.startswith("claudinho e agora? "):
-        parts = text_stripped.split(maxsplit=3)
-        if len(parts) == 4:
-            symbol = parts[3].strip()
+    if text_lower.startswith("rescue "):
+        parts = text_stripped.split(maxsplit=1)
+        if len(parts) == 2:
+            symbol = parts[1].strip()
             handle_rescue(symbol)
         else:
-            send_message("Uso: Claudinho e agora? SYMBOL  (ex: Claudinho e agora? SOLUSDT)")
+            send_message("Uso: rescue SYMBOL  (ex: rescue SOLUSDT)")
         return
 
 
