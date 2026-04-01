@@ -53,6 +53,31 @@ def send_message(text: str) -> bool:
         return False
 
 
+def send_message_html(text: str) -> bool:
+    """
+    Envia mensagem com parse_mode HTML para o chat configurado.
+    Usar para mensagens com tags <b>, <pre>, <i>, etc.
+    Retorna True se enviou com sucesso, False caso contrario.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[NOTIFIER] Telegram nao configurado. Mensagem suprimida:\n{text}")
+        return False
+
+    url     = f"{TELEGRAM_BASE_URL}/sendMessage"
+    payload = {
+        "chat_id":    TELEGRAM_CHAT_ID,
+        "text":       text,
+        "parse_mode": "HTML",
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[NOTIFIER] Falha ao enviar mensagem HTML: {e}")
+        return False
+
+
 def send_message_pre(text: str) -> bool:
     """
     Envia mensagem em bloco <pre> (monospace) via HTML parse_mode.

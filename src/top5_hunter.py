@@ -314,6 +314,9 @@ def score_5m(df):
     score = 0
     detail = {}
 
+    bb_spread_pct = (last["bb_upper"] - last["bb_lower"]) / (last["bb_lower"] + 1e-10) * 100
+    detail["bb_spread_pct"] = round(bb_spread_pct, 2)
+
     vol_ok = last["volume"] > last["vol_ma20"] * VOLUME_ABOVE_FACTOR
     if vol_ok:
         score += 1
@@ -495,7 +498,11 @@ def scan_top5(regime="trending"):
     print(f"[INFO] Scan completo em {elapsed:.1f}s")
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    results = [r for r in results if r["score"] >= score_min]
+    results = [
+        r for r in results
+        if r["score"] >= score_min
+        and r["detail_5m"].get("bb_spread_pct", 100.0) >= 3.0
+    ]
     top5 = results[:5]
 
     return top5
@@ -522,7 +529,7 @@ def print_top5(results):
         print(f"    Entrada:  {r['entry_price']}")
         print(f"    Vol 24h:  ${r['volume_24h']:,.0f}")
         print(f"    15m [{r['score_15m']}/5]: BB={r['detail_15m'].get('bb_rising')}  TSI={r['detail_15m'].get('tsi_positive')}  Stoch={r['detail_15m'].get('stoch_k')}  MACD={r['detail_15m'].get('macd_ok')}  Dupla={double}")
-        print(f"    5m  [{r['score_5m']}/4]: Vol={r['detail_5m'].get('volume_ok')}  MACD={r['detail_5m'].get('macd_rising')}  Stoch={r['detail_5m'].get('stoch_k')}  DistBB={r['detail_5m'].get('dist_upper_pct')}%")
+        print(f"    5m  [{r['score_5m']}/4]: Vol={r['detail_5m'].get('volume_ok')}  MACD={r['detail_5m'].get('macd_rising')}  Stoch={r['detail_5m'].get('stoch_k')}  DistBB={r['detail_5m'].get('dist_upper_pct')}%  BBspr={r['detail_5m'].get('bb_spread_pct')}%")
         print(f"    1m  [{r['score_1m']}/3]: VolExp={r['detail_1m'].get('vol_explosion')}({r['detail_1m'].get('vol_ratio')}x)  Corpo={r['detail_1m'].get('body_ratio')}  Stoch={r['detail_1m'].get('stoch_k')}")
 
     print(f"\n{'=' * 60}")

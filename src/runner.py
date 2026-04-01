@@ -39,6 +39,7 @@ from market_analyzer       import run_analyzer, get_latest_regime, format_analyz
 from rescue_protocol       import run_rescue
 from notifier              import (
     send_message,
+    send_message_html,
     format_top5,
     format_cascade,
     format_spark,
@@ -149,11 +150,18 @@ def run_top5():
                 regime = get_latest_regime()
                 results = scan_top5(regime=regime)
                 if results:
-                    text = format_top5(results, triggered_by="loop")
-                    if text:
-                        for r in results:
-                            notify_if_eligible(r["symbol"], text)
-                            break
+                    with state_lock:
+                        is_muted = muted
+                    if not is_muted:
+                        fresh = [r for r in results if not is_on_cooldown(r["symbol"])]
+                        if fresh:
+                            text = format_top5(fresh, triggered_by="loop")
+                            if text:
+                                if send_message(text):
+                                    with state_lock:
+                                        now = datetime.now()
+                                        for r in results:   # marca TODOS, nao so os fresh
+                                            cooldown_map[r["symbol"]] = now
             except Exception as e:
                 print(f"[RUNNER] Erro no scan Top5: {e}")
         time.sleep(INTERVAL_TOP5)
@@ -301,7 +309,7 @@ def handle_rescue(symbol: str):
 def _handle_como_ta_hoje():
     result = run_analyzer(triggered_by="command")
     msg    = format_analyzer_message(result)
-    send_message(msg)
+    send_message_html(msg)
 
 
 # -----------------------------------------------------------------------

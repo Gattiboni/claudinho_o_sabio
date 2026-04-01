@@ -347,6 +347,8 @@ def check_5m(df, df_btc_5m):
     if spread is None:
         return False, {}
 
+    bb_spread_veto = spread < 3.0
+
     sl_level = last["bb_lower"]
     sl_pct   = round((last["close"] - last["bb_lower"]) / last["close"] * 100, 2)
     callback = CALLBACK_HIGH_VOLATILITY if spread >= BB_SPREAD_THRESHOLD_PCT else CALLBACK_LOW_VOLATILITY
@@ -363,7 +365,7 @@ def check_5m(df, df_btc_5m):
     except Exception:
         macd_recovery_val = None
 
-    passed  = macd_ok and same_dir_ok and bb_ok and price_above_ma7 and btc_ok
+    passed  = macd_ok and same_dir_ok and bb_ok and price_above_ma7 and btc_ok and not bb_spread_veto
     details = {
         "macd_ok":               macd_ok,
         "macd_positive":         macd_positive,
@@ -375,6 +377,7 @@ def check_5m(df, df_btc_5m):
         "bb_bands_rising":       bb_ok,
         "price_above_ma7":       price_above_ma7,
         "bb_spread_pct":         round(spread, 2),
+        "bb_spread_veto":        bb_spread_veto,
         "sl_level":              round(sl_level, 6),
         "sl_pct_from_entry":     sl_pct,
         "trailing_callback_pct": callback,
@@ -475,6 +478,7 @@ def fetch_fase2(candidate, df_btc_5m, regime="trending"):
             if not details_5m.get("price_above_ma7"):      motivos.append("5m:MA7")
             if details_5m.get("btc_case") == "dead_zone":  motivos.append("5m:BTC_dz")
             if details_5m.get("btc_case") == "unknown":    motivos.append("5m:BTC_unk")
+            if details_5m.get("bb_spread_veto"):           motivos.append("5m:BB_spread<3%")
         print(f"  [SKIP] {symbol:20s} | {item['change_pct']:+6.2f}% | {', '.join(motivos)}")
 
     return None
