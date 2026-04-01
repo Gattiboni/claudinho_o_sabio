@@ -24,6 +24,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 
 
 # -----------------------------------------------------------------------
@@ -77,6 +78,12 @@ BODY_FULL_RATIO         = 0.5
 # Paralelismo
 MAX_WORKERS_FASE1 = 20
 MAX_WORKERS_FASE2 = 10
+
+# Bear/crab mode
+BEAR_CHANGE_MIN_24H_PCT = 5.0
+BEAR_SCORE_MIN          = 6
+BEAR_1M_BULLISH_MIN     = 3
+BEAR_1M_VOL_ACCEL       = 1.3
 
 
 # -----------------------------------------------------------------------
@@ -160,7 +167,7 @@ def enrich(df):
 # COLETA DE DADOS
 # -----------------------------------------------------------------------
 
-def get_universe():
+def get_universe(change_min=CHANGE_MIN_24H_PCT):
     try:
         resp = requests.get(f"{BINANCE_BASE_URL}/fapi/v1/ticker/24hr", timeout=10)
         resp.raise_for_status()
@@ -197,7 +204,7 @@ def get_universe():
 
         if volume < VOLUME_MIN_24H_USD:
             continue
-        if change < CHANGE_MIN_24H_PCT:
+        if change < change_min:
             continue
 
         candidates.append({
@@ -391,7 +398,7 @@ def fetch_fase1(item):
     }
 
 
-def fetch_fase2(candidate):
+def fetch_fase2(candidate, regime="trending"):
     """Busca 5m e 1m para quem passou a fase 1."""
     symbol = candidate["item"]["symbol"]
     df_5m  = enrich(get_candles(symbol, "5m"))
@@ -401,19 +408,43 @@ def fetch_fase2(candidate):
     s1, d1 = score_1m(df_1m)
 
     entry_price = float(df_5m.iloc[-1]["close"]) if df_5m is not None else None
+    total_score = candidate["score_15m"] + s5 + s1
+
+    detail_1m_momentum = None
+    if regime in ("crab", "bear"):
+        df_1m_raw = get_candles(symbol, "1m", limit=20)
+        df_1m_enr = enrich(df_1m_raw)
+        if df_1m_enr is not None and len(df_1m_enr) >= 7:
+            recent_5    = df_1m_enr.iloc[-6:-1]
+            bull_count  = int((recent_5["close"] > recent_5["open"]).sum())
+            vol_mean_5  = recent_5["volume"].mean()
+            vol_accel   = recent_5["volume"].iloc[-3:].mean() / (vol_mean_5 + 1e-10)
+            momentum_ok = (
+                bull_count >= BEAR_1M_BULLISH_MIN and
+                vol_accel  >= BEAR_1M_VOL_ACCEL
+            )
+            if not momentum_ok:
+                # Penalidade: reduz score em 1 (nao eliminacao direta, para nao ser muito restritivo)
+                total_score -= 1
+            detail_1m_momentum = {
+                "bull_count":   bull_count,
+                "vol_accel":    round(float(vol_accel), 2),
+                "momentum_ok":  momentum_ok,
+            }
 
     return {
-        "symbol":      symbol,
-        "change_pct":  candidate["item"]["change_pct"],
-        "volume_24h":  candidate["item"]["volume_24h"],
-        "score":       candidate["score_15m"] + s5 + s1,
-        "score_15m":   candidate["score_15m"],
-        "score_5m":    s5,
-        "score_1m":    s1,
-        "detail_15m":  candidate["detail_15m"],
-        "detail_5m":   d5,
-        "detail_1m":   d1,
-        "entry_price": entry_price,
+        "symbol":              symbol,
+        "change_pct":          candidate["item"]["change_pct"],
+        "volume_24h":          candidate["item"]["volume_24h"],
+        "score":               total_score,
+        "score_15m":           candidate["score_15m"],
+        "score_5m":            s5,
+        "score_1m":            s1,
+        "detail_15m":          candidate["detail_15m"],
+        "detail_5m":           d5,
+        "detail_1m":           d1,
+        "detail_1m_momentum":  detail_1m_momentum,
+        "entry_price":         entry_price,
     }
 
 
@@ -421,12 +452,17 @@ def fetch_fase2(candidate):
 # SCANNER PRINCIPAL
 # -----------------------------------------------------------------------
 
-def scan_top5():
+def scan_top5(regime="trending"):
     t_start = datetime.now()
     print(f"\n[{t_start.strftime('%H:%M:%S')}] Top 5 Hunter iniciando...")
 
-    universe = get_universe()
-    print(f"[INFO] {len(universe)} ativos no universo (vol > $30M, variacao > 10%)")
+    bear_mode  = regime in ("crab", "bear")
+    change_min = BEAR_CHANGE_MIN_24H_PCT if bear_mode else CHANGE_MIN_24H_PCT
+    score_min  = BEAR_SCORE_MIN          if bear_mode else SCORE_MIN
+    print(f"[INFO] Regime atual: {regime} | change_min={change_min}% | score_min={score_min}")
+
+    universe = get_universe(change_min=change_min)
+    print(f"[INFO] {len(universe)} ativos no universo (vol > $2M, variacao > {change_min}%)")
 
     if not universe:
         return []
@@ -448,7 +484,8 @@ def scan_top5():
     # Fase 2: score 5m + 1m em paralelo apenas para quem passou
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS_FASE2) as executor:
-        futures = {executor.submit(fetch_fase2, candidate): candidate for candidate in fase1_passed}
+        _fetch_fase2 = partial(fetch_fase2, regime=regime)
+        futures = {executor.submit(_fetch_fase2, candidate): candidate for candidate in fase1_passed}
         for future in as_completed(futures):
             result = future.result()
             if result is not None:
@@ -458,7 +495,7 @@ def scan_top5():
     print(f"[INFO] Scan completo em {elapsed:.1f}s")
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    results = [r for r in results if r["score"] >= SCORE_MIN]
+    results = [r for r in results if r["score"] >= score_min]
     top5 = results[:5]
 
     return top5

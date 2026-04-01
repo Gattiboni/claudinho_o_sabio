@@ -47,6 +47,14 @@ CALLBACK_HIGH           = 5.0
 
 MAX_WORKERS_FASE1 = 20
 
+# Bear/crab mode
+BEAR_PRESIGNAL_CANDLES = 2
+BEAR_NEAR_UPPER_PCT    = 3.0
+BEAR_VOLUME_EXPLOSION  = 2.0
+BEAR_BODY_FULL_RATIO   = 0.5
+BEAR_1M_BULLISH_MIN    = 3
+BEAR_1M_VOL_ACCEL      = 1.3
+
 
 # -----------------------------------------------------------------------
 # INDICADORES NATIVOS
@@ -136,15 +144,19 @@ def check_compression(df_1h, df_15m):
     return passed, details
 
 
-def check_presignal(df_5m):
+def check_presignal(df_5m, regime="trending"):
     if df_5m is None:
         return False, {}
+
+    bear_mode         = regime in ("crab", "bear")
+    presignal_candles = BEAR_PRESIGNAL_CANDLES if bear_mode else PRESIGNAL_CANDLES
+    near_upper_thresh = BEAR_NEAR_UPPER_PCT    if bear_mode else 1.5
 
     df_5m = add_bbands(df_5m)
     if df_5m is None:
         return False, {}
 
-    recent = df_5m.iloc[-(PRESIGNAL_CANDLES + 1):-1]
+    recent = df_5m.iloc[-(presignal_candles + 1):-1]
     last   = df_5m.iloc[-1]
 
     bodies_ok = all(
@@ -154,14 +166,14 @@ def check_presignal(df_5m):
 
     closes_up = sum(
         1 for _, row in recent.iterrows() if row["close"] > row["open"]
-    ) >= (PRESIGNAL_CANDLES - 1)
+    ) >= (presignal_candles - 1)
 
     vol_mean   = df_5m["volume_ma20"].iloc[-1]
     vol_creep  = recent["volume"].mean() >= vol_mean * VOLUME_CREEP_FACTOR
     vol_no_exp = recent["volume"].max() < vol_mean * 2.5
 
     dist_to_upper = (last["bb_upper"] - last["close"]) / last["bb_upper"] * 100
-    near_upper    = dist_to_upper <= 1.5
+    near_upper    = dist_to_upper <= near_upper_thresh
 
     passed  = bodies_ok and closes_up and vol_creep and vol_no_exp and near_upper
     details = {
@@ -175,9 +187,13 @@ def check_presignal(df_5m):
     return passed, details
 
 
-def check_trigger(df_1m):
+def check_trigger(df_1m, regime="trending"):
     if df_1m is None:
         return False, {}
+
+    bear_mode = regime in ("crab", "bear")
+    vol_explosion_factor = BEAR_VOLUME_EXPLOSION if bear_mode else VOLUME_EXPLOSION_FACTOR
+    body_full_ratio      = BEAR_BODY_FULL_RATIO  if bear_mode else BODY_FULL_RATIO
 
     df_1m = add_bbands(df_1m)
     if df_1m is None:
@@ -186,32 +202,52 @@ def check_trigger(df_1m):
     last = df_1m.iloc[-1]
 
     vol_mean      = df_1m["volume_ma20"].iloc[-1]
-    vol_explosion = last["volume"] >= vol_mean * VOLUME_EXPLOSION_FACTOR
+    vol_explosion = last["volume"] >= vol_mean * vol_explosion_factor
 
     candle_range = last["high"] - last["low"]
     body_ratio   = abs(last["close"] - last["open"]) / (candle_range + 1e-10)
-    full_body    = body_ratio >= BODY_FULL_RATIO
+    full_body    = body_ratio >= body_full_ratio
 
-    breakout = last["close"] > last["bb_upper"]
+    if bear_mode:
+        breakout = last["close"] > last["bb_mid"] and last["close"] > last["open"]
+    else:
+        breakout = last["close"] > last["bb_upper"]
+
+    momentum_ok         = True
+    momentum_bull_count = None
+    momentum_vol_accel  = None
+
+    if bear_mode and len(df_1m) >= 7:
+        recent_5            = df_1m.iloc[-6:-1]
+        momentum_bull_count = int((recent_5["close"] > recent_5["open"]).sum())
+        vol_mean_5          = recent_5["volume"].mean()
+        vol_accel           = recent_5["volume"].iloc[-3:].mean() / (vol_mean_5 + 1e-10)
+        momentum_vol_accel  = round(float(vol_accel), 2)
+        momentum_ok = (
+            momentum_bull_count >= BEAR_1M_BULLISH_MIN and
+            vol_accel >= BEAR_1M_VOL_ACCEL
+        )
 
     spread   = (last["bb_upper"] - last["bb_lower"]) / last["bb_lower"] * 100
     sl_level = last["bb_lower"]
     sl_pct   = round((last["close"] - last["bb_lower"]) / last["close"] * 100, 2)
     callback = CALLBACK_HIGH if spread >= BB_SPREAD_LOW_THRESHOLD else CALLBACK_LOW
 
-    passed  = vol_explosion and full_body and breakout
+    passed  = vol_explosion and full_body and breakout and momentum_ok
     details = {
-        "vol_explosion":         vol_explosion,
-        "vol_ratio":             round(last["volume"] / (vol_mean + 1e-10), 2),
-        "full_body":             full_body,
-        "body_ratio":            round(body_ratio, 2),
-        "breakout_upper_bb":     breakout,
-        "entry_price":           round(float(last["close"]), 6),
-        "sl_level":              round(float(sl_level), 6),
-        "sl_pct_from_entry":     sl_pct,
-        "trailing_callback_pct": callback,
-        "bb_spread_pct":         round(spread, 2),
-        "bb_upper":              round(float(last["bb_upper"]), 6),
+        "vol_explosion":          vol_explosion,
+        "vol_ratio":              round(last["volume"] / (vol_mean + 1e-10), 2),
+        "full_body":              full_body,
+        "body_ratio":             round(body_ratio, 2),
+        "breakout_upper_bb":      breakout,
+        "entry_price":            round(float(last["close"]), 6),
+        "sl_level":               round(float(sl_level), 6),
+        "sl_pct_from_entry":      sl_pct,
+        "trailing_callback_pct":  callback,
+        "bb_spread_pct":          round(spread, 2),
+        "bb_upper":               round(float(last["bb_upper"]), 6),
+        "momentum_1m_bull_count": momentum_bull_count,
+        "momentum_1m_vol_accel":  momentum_vol_accel,
     }
     return passed, details
 
@@ -248,9 +284,10 @@ def fetch_compression(item):
 # SCANNER PRINCIPAL
 # -----------------------------------------------------------------------
 
-def scan_spark():
+def scan_spark(regime="trending"):
     t_start = datetime.now()
     print(f"\n[{t_start.strftime('%H:%M:%S')}] Iniciando scan Spark...")
+    print(f"[INFO] Regime atual: {regime}")
 
     universe = get_spark_universe()
     print(f"[INFO] {len(universe)} candidatos no universo Spark (esquecidos, sem movimento)")
@@ -276,7 +313,7 @@ def scan_spark():
         details_comp = candidate["details_comp"]
 
         df_5m = get_candles(symbol, "5m")
-        ok_pre, details_pre = check_presignal(df_5m)
+        ok_pre, details_pre = check_presignal(df_5m, regime=regime)
 
         if not ok_pre:
             if DEBUG:
@@ -290,7 +327,7 @@ def scan_spark():
             continue
 
         df_1m = get_candles(symbol, "1m")
-        ok_trig, details_trig = check_trigger(df_1m)
+        ok_trig, details_trig = check_trigger(df_1m, regime=regime)
 
         if not ok_trig:
             print(f"  [CANDIDATO]  {symbol:20s} | {change:+6.2f}% | comprimido + pre-sinal | aguardando PAH")

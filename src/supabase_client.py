@@ -186,3 +186,32 @@ def select_range(table: str, time_col: str, start_iso: str, end_iso: str,
     except Exception as e:
         print(f"[SUPABASE] Erro ao buscar range {table}: {e}")
         return []
+
+
+def select_ordered(table: str, order_col: str, order_dir: str = "desc",
+                   filters: dict = None, limit: int = 1) -> list:
+    """
+    Busca registros com ordenacao.
+    order_dir: 'asc' ou 'desc'
+    Util para buscar o registro mais recente (limit=1, order_dir='desc').
+    """
+    try:
+        _check_config()
+        from urllib.parse import quote
+        params_str = f"?order={order_col}.{order_dir}&limit={limit}"
+        if filters:
+            for col, val in filters.items():
+                params_str += f"&{col}=eq.{quote(str(val), safe='')}"
+        headers = {**_HEADERS, "Prefer": ""}
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table}{params_str}",
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        print(f"[SUPABASE] Erro ao buscar ordenado {table}: {resp.status_code} {resp.text}")
+        return []
+    except Exception as e:
+        print(f"[SUPABASE] Erro ao buscar ordenado {table}: {e}")
+        return []

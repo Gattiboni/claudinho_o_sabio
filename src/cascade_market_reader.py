@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -54,6 +55,10 @@ CORR_INDEPENDENT_MAX = 0.4
 
 MAX_WORKERS_FASE1 = 20
 MAX_WORKERS_FASE2 = 10
+
+# Bear/crab mode
+BEAR_1M_BULLISH_MIN = 3
+BEAR_1M_VOL_ACCEL   = 1.3
 
 
 # -----------------------------------------------------------------------
@@ -253,19 +258,31 @@ def bb_bands_rising(df, window=5):
            df["bb_lower"].iloc[-1] > df["bb_lower"].iloc[-window]
 
 
-def check_1h(df):
+def check_1h(df, regime="trending"):
     if df is None or len(df) < 2:
         return False, {}
     last = df.iloc[-1]
     ma_veto       = last["ma7"] < last["ma99"]
     hist_abs_mean = df["macd_hist"].abs().tail(20).mean()
     macd_veto     = last["macd_hist"] < -(hist_abs_mean * 0.5)
-    passed  = not (ma_veto or macd_veto)
+
+    bear_mode = regime in ("crab", "bear")
+
+    # MA veto: hard em trending, warning em crab/bear
+    ma_veto_warning = False
+    if bear_mode and ma_veto:
+        ma_veto_warning   = True
+        ma_veto_effective = False   # nao bloqueia em bear/crab
+    else:
+        ma_veto_effective = ma_veto
+
+    passed  = not ma_veto_effective and not macd_veto
     details = {
-        "ma_veto":        ma_veto,
-        "macd_veto":      macd_veto,
-        "ma7_above_ma99": last["ma7"] > last["ma99"],
-        "macd_hist":      round(float(last["macd_hist"]), 8),
+        "ma_veto":         ma_veto,
+        "macd_veto":       macd_veto,
+        "ma7_above_ma99":  last["ma7"] > last["ma99"],
+        "macd_hist":       round(float(last["macd_hist"]), 8),
+        "ma_veto_warning": ma_veto_warning,
     }
     return passed, details
 
@@ -374,13 +391,13 @@ def check_5m(df, df_btc_5m):
 # WORKERS PARALELOS
 # -----------------------------------------------------------------------
 
-def fetch_fase1(item, df_btc_15m):
+def fetch_fase1(item, df_btc_15m, regime="trending"):
     symbol = item["symbol"]
     if symbol == BTC_SYMBOL:
         return None
 
     df_1h = calculate_indicators(get_candles(symbol, "1h"))
-    ok_1h, details_1h = check_1h(df_1h)
+    ok_1h, details_1h = check_1h(df_1h, regime=regime)
     if not ok_1h:
         if DEBUG:
             motivos = []
@@ -400,7 +417,7 @@ def fetch_fase1(item, df_btc_15m):
     }
 
 
-def fetch_fase2(candidate, df_btc_5m):
+def fetch_fase2(candidate, df_btc_5m, regime="trending"):
     item        = candidate["item"]
     symbol      = item["symbol"]
     details_1h  = candidate["details_1h"]
@@ -411,6 +428,24 @@ def fetch_fase2(candidate, df_btc_5m):
     ok_5m, details_5m = check_5m(df_5m, df_btc_5m)
 
     if ok_15m and ok_5m:
+        result_1m = None
+        if regime in ("crab", "bear"):
+            df_1m = get_candles(symbol, "1m", limit=20)
+            if df_1m is not None and len(df_1m) >= 7:
+                recent_5    = df_1m.iloc[-6:-1]
+                bull_count  = int((recent_5["close"] > recent_5["open"]).sum())
+                vol_mean_5  = recent_5["volume"].mean()
+                vol_accel   = recent_5["volume"].iloc[-3:].mean() / (vol_mean_5 + 1e-10)
+                momentum_ok = (
+                    bull_count >= BEAR_1M_BULLISH_MIN and
+                    vol_accel  >= BEAR_1M_VOL_ACCEL
+                )
+                if not momentum_ok:
+                    if DEBUG:
+                        print(f"  [SKIP-1M]    {symbol:20s} | bear/crab: momentum 1m insuficiente (bull={bull_count}, vol_accel={vol_accel:.2f})")
+                    return None
+                result_1m = {"bull_count": bull_count, "vol_accel": round(float(vol_accel), 2)}
+
         return {
             "symbol":         symbol,
             "change_24h_pct": item["change_pct"],
@@ -418,6 +453,7 @@ def fetch_fase2(candidate, df_btc_5m):
             "1h":             details_1h,
             "15m":            details_15m,
             "5m":             details_5m,
+            "1m":             result_1m,
             "passed":         True,
         }
 
@@ -448,9 +484,10 @@ def fetch_fase2(candidate, df_btc_5m):
 # SCANNER PRINCIPAL
 # -----------------------------------------------------------------------
 
-def scan_market():
+def scan_market(regime="trending"):
     t_start = datetime.now()
     print(f"\n[{t_start.strftime('%H:%M:%S')}] Iniciando scan Cascade...")
+    print(f"[INFO] Regime atual: {regime}")
 
     symbols_data = get_top_bottom_symbols()
     if not symbols_data:
@@ -464,7 +501,8 @@ def scan_market():
 
     fase1_passed = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS_FASE1) as executor:
-        futures = {executor.submit(fetch_fase1, item, df_btc_15m): item for item in symbols_data}
+        _fetch_fase1 = partial(fetch_fase1, df_btc_15m=df_btc_15m, regime=regime)
+        futures = {executor.submit(_fetch_fase1, item): item for item in symbols_data}
         for future in as_completed(futures):
             result = future.result()
             if result is not None:
@@ -479,7 +517,8 @@ def scan_market():
 
     setups = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS_FASE2) as executor:
-        futures = {executor.submit(fetch_fase2, candidate, df_btc_5m): candidate for candidate in fase1_passed}
+        _fetch_fase2 = partial(fetch_fase2, df_btc_5m=df_btc_5m, regime=regime)
+        futures = {executor.submit(_fetch_fase2, candidate): candidate for candidate in fase1_passed}
         for future in as_completed(futures):
             result = future.result()
             if result is not None and result.get("passed"):

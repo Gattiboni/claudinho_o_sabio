@@ -35,6 +35,7 @@ from cascade_market_reader import scan_market
 from spark_market_reader   import scan_spark
 from roar_hunter           import scan_roar
 from confirm               import analyze_to_dict
+from market_analyzer       import run_analyzer, get_latest_regime, format_analyzer_message
 from rescue_protocol       import run_rescue
 from notifier              import (
     send_message,
@@ -58,8 +59,9 @@ INTERVAL_TOP5    = int(os.getenv("SCAN_INTERVAL_TOP5",    30)) * 60
 INTERVAL_CASCADE = int(os.getenv("SCAN_INTERVAL_CASCADE", 30)) * 60
 INTERVAL_SPARK   = int(os.getenv("SCAN_INTERVAL_SPARK",   15)) * 60
 INTERVAL_ROAR    = int(os.getenv("SCAN_INTERVAL_ROAR",    30)) * 60
+INTERVAL_ANALYZER = 60 * 60  # 1 hora
 
-COOLDOWN_MINUTES = 15
+COOLDOWN_MINUTES = 10
 TIMEZONE         = pytz.timezone("America/Sao_Paulo")
 
 NOTIFICATION_TRADE_WINDOW = 5
@@ -128,12 +130,24 @@ def notify_if_eligible(symbol: str, text: str):
 # RUNNERS DE SCAN
 # -----------------------------------------------------------------------
 
+def run_analyzer_loop():
+    print(f"[RUNNER] Thread Analyzer iniciada (intervalo: {INTERVAL_ANALYZER // 60} min)")
+    while True:
+        time.sleep(INTERVAL_ANALYZER)
+        try:
+            run_analyzer(triggered_by="schedule")
+            # Silencioso: nao envia mensagem pro Telegram quando agendado
+        except Exception as e:
+            print(f"[RUNNER] Erro no analyzer: {e}")
+
+
 def run_top5():
     print(f"[RUNNER] Thread Top5 iniciada (intervalo: {INTERVAL_TOP5 // 60} min)")
     while True:
         if within_schedule():
             try:
-                results = scan_top5()
+                regime = get_latest_regime()
+                results = scan_top5(regime=regime)
                 if results:
                     text = format_top5(results, triggered_by="loop")
                     if text:
@@ -150,7 +164,8 @@ def run_cascade():
     while True:
         if within_schedule():
             try:
-                setups = scan_market()
+                regime = get_latest_regime()
+                setups = scan_market(regime=regime)
                 if setups:
                     for setup in setups:
                         symbol = setup["symbol"]
@@ -166,7 +181,8 @@ def run_spark():
     while True:
         if within_schedule():
             try:
-                sparks = scan_spark()
+                regime = get_latest_regime()
+                sparks = scan_spark(regime=regime)
                 if sparks:
                     for spark in sparks:
                         symbol = spark["symbol"]
@@ -208,8 +224,10 @@ def run_once():
 
     send_message("Rodando os protocolos agora...")
 
+    regime = get_latest_regime()
+
     try:
-        results = scan_top5()
+        results = scan_top5(regime=regime)
         if results:
             text = format_top5(results, triggered_by="manual")
             if text:
@@ -222,7 +240,7 @@ def run_once():
         send_message(f"[TOP5] Erro no scan: {e}")
 
     try:
-        setups = scan_market()
+        setups = scan_market(regime=regime)
         if setups:
             for setup in setups:
                 text = format_cascade([setup], triggered_by="manual")
@@ -234,7 +252,7 @@ def run_once():
         send_message(f"[CASCADE] Erro no scan: {e}")
 
     try:
-        sparks = scan_spark()
+        sparks = scan_spark(regime=regime)
         if sparks:
             for spark in sparks:
                 text = format_spark([spark], triggered_by="manual")
@@ -278,6 +296,12 @@ def handle_confirm(symbol: str):
 
 def handle_rescue(symbol: str):
     threading.Thread(target=run_rescue, args=(symbol,), daemon=True).start()
+
+
+def _handle_como_ta_hoje():
+    result = run_analyzer(triggered_by="command")
+    msg    = format_analyzer_message(result)
+    send_message(msg)
 
 
 # -----------------------------------------------------------------------
@@ -348,6 +372,12 @@ def process_message(text: str):
         else:
             with state_lock:
                 awaiting_analysis = False
+
+    if "como ta hoje" in text_lower or "como esta hoje" in text_lower:
+        threading.Thread(
+            target=_handle_como_ta_hoje, daemon=True
+        ).start()
+        return
 
     if text_lower == "claudinho roda os protocolos":
         threading.Thread(target=run_once, daemon=True).start()
@@ -438,10 +468,11 @@ if __name__ == "__main__":
         print("[RUNNER] ATENCAO: TELEGRAM_BOT_TOKEN nao configurado. Polling e notificacoes desativados.")
 
     threads = [
-        threading.Thread(target=run_top5,    daemon=True, name="top5"),
-        threading.Thread(target=run_cascade,  daemon=True, name="cascade"),
-        threading.Thread(target=run_spark,    daemon=True, name="spark"),
-        threading.Thread(target=run_roar,     daemon=True, name="roar"),
+        threading.Thread(target=run_top5,          daemon=True, name="top5"),
+        threading.Thread(target=run_cascade,        daemon=True, name="cascade"),
+        threading.Thread(target=run_spark,          daemon=True, name="spark"),
+        threading.Thread(target=run_roar,           daemon=True, name="roar"),
+        threading.Thread(target=run_analyzer_loop,  daemon=True, name="analyzer"),
     ]
 
     if TELEGRAM_BOT_TOKEN:
@@ -453,7 +484,8 @@ if __name__ == "__main__":
     send_message(
         f"claudinho_o_sabio online — {ts}\n"
         f"Intervalos: Top5={INTERVAL_TOP5 // 60}min | Cascade={INTERVAL_CASCADE // 60}min | "
-        f"Spark={INTERVAL_SPARK // 60}min | Roar={INTERVAL_ROAR // 60}min\n"
+        f"Spark={INTERVAL_SPARK // 60}min | Roar={INTERVAL_ROAR // 60}min | "
+        f"Analyzer: horario | \n"
         f"Horario automatico: seg-sex 06-23:59 | dom 20-23:59"
     )
 
