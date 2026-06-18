@@ -5,6 +5,64 @@ em Keep a Changelog (https://keepachangelog.com).
 
 ---
 
+## [0.7.1] - 2026-03-31
+
+### Corrigido
+
+- src/notifier.py: send_message_html() adicionada com parse_mode HTML —
+  mensagens do analyzer chegavam com tags <b> e <pre> como texto cru
+- src/runner.py: _handle_como_ta_hoje usa send_message_html
+- src/runner.py: run_top5 refatorado — filtra simbolos em cooldown antes de
+  enviar, marca todos os simbolos do scan no cooldown_map (antes so o #1 era
+  marcado, causando repeticao dos demais a cada ciclo)
+- src/cascade_market_reader.py: veto bb_spread_veto < 3% adicionado em check_5m,
+  incluido em passed e no debug log
+- src/top5_hunter.py: bb_spread_pct calculado em score_5m, veto < 3% no filtro
+  final de scan_top5, exibido no print_top5
+
+---
+
+## [0.7.0] - 2026-03-31
+
+### Adicionado
+
+- src/cryptopanic_client.py: wrapper CryptoPanic Developer API v2 — fetch_news()
+  e fetch_important_news()
+- src/market_analyzer.py: classificador de regime de mercado
+  (trending/crab/bear) via BTC score 0-4 (bb_mid, bb_rising, macd_ok, ma7_4h) e
+  breadth de altcoins (acima de 3%, 5% e 10%). Persiste em market_regime.
+  Integra noticias via CryptoPanic. Expoe get_latest_regime() e
+  format_analyzer_message()
+- Tabela Supabase: market_regime (id, created_at, regime, btc_score, flags
+  booleanas BTC, alts_above_*, news_headlines jsonb, triggered_by)
+- src/supabase_client.py: select_ordered() com suporte a ordenacao e limit
+- Comando Telegram: "Claudinho, como ta hoje?" — aciona run_analyzer e envia
+  relatorio HTML formatado
+- Thread run_analyzer_loop: roda a cada hora em background, silencioso
+
+### Modificado
+
+- src/runner.py: import market_analyzer, INTERVAL_ANALYZER=3600,
+  COOLDOWN_MINUTES 15 -> 10, run_analyzer_loop thread adicionada, regime passado
+  a todos os scanners via get_latest_regime()
+- src/spark_market_reader.py: bear/crab mode — thresholds de presignal
+  relaxados, breakout substituido por pre-breakout, filtro momentum 1m
+  (BEAR_1M_BULLISH_MIN=3, BEAR_1M_VOL_ACCEL=1.3). scan_spark aceita regime=
+- src/cascade_market_reader.py: bear/crab mode — veto MA no 1h vira warning,
+  filtro momentum 1m obrigatorio na fase 2. functools.partial para propagar
+  regime nos workers. scan_market aceita regime=
+- src/top5_hunter.py: bear/crab mode — change_min 10% -> 5%, score_min 7 -> 6,
+  penalidade -1 se momentum 1m insuficiente. get_universe parametrizado.
+  scan_top5 aceita regime=
+
+### Variaveis de ambiente adicionadas
+
+- CRYPTOPANIC_API_KEY: chave Developer API CryptoPanic
+- SCAN_INTERVAL_TOP5=5, SCAN_INTERVAL_CASCADE=5, SCAN_INTERVAL_SPARK=5
+  (reduzidos de 30/30/15 para 5 minutos)
+
+---
+
 ## [0.6.0] - 2026-03-27
 
 ### Adicionado

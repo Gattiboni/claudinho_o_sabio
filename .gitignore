@@ -57,3 +57,4 @@ htmlcov/
 
 # Railway e deploy
 .railway/
+graphify-out/

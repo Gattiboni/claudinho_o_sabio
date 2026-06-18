@@ -5,6 +5,122 @@ o que foi decidido, por que, e quais alternativas foram descartadas.
 
 ---
 
+## [DEC-032] 2026-03-31 - BB spread veto < 3% no 5m para Cascade e Top5
+
+Decisao: vetar ativos cujo spread das Bollinger Bands no 5m seja inferior a 3%
+nos protocolos Cascade e Top5 Hunter. Nao se aplica ao Spark.
+
+Racional: BB spread abaixo de 3% indica banda comprimida sem amplitude para
+movimento expressivo. Em mercado fraco, esses ativos sao especialmente sujeitos
+ao temperamento do BTC — qualquer escorregada os carrega junto sem upside
+proprio para compensar. O Spark nao recebe o veto porque compressao e
+precisamente sua condicao de entrada: ele busca o ativo antes do movimento, nao
+durante.
+
+Alternativas descartadas: veto global incluindo Spark. Descartado porque
+contradiz a logica central do protocolo.
+
+---
+
+## [DEC-031] 2026-03-31 - Cooldown Top5: marcar todos os simbolos do scan
+
+Decisao: ao enviar uma notificacao Top5, marcar todos os simbolos retornados
+pelo scanner no cooldown_map — nao apenas o primeiro da lista. Antes de enviar,
+filtrar a lista para remover simbolos ja em cooldown e enviar apenas os fresh.
+
+Racional: o comportamento anterior marcava so o simbolo #1, permitindo que os
+demais (posicoes 2 a 5) reaparecessem em mensagens subsequentes a cada 5 min. O
+cooldown e por ativo, nao por mensagem. Qualquer ativo que o scanner identificou
+neste ciclo consumiu seu slot — apareceu na mensagem ou nao.
+
+Alternativas descartadas: suprimir o envio inteiro se qualquer simbolo estiver
+em cooldown. Descartado por ser restritivo demais — um batch com 4 ativos novos
+e 1 repetido nao deveria ser inteiro suprimido.
+
+---
+
+## [DEC-030] 2026-03-31 - Intervalos de scan reduzidos para 5 minutos
+
+Decisao: reduzir SCAN_INTERVAL_TOP5, SCAN_INTERVAL_CASCADE, SCAN_INTERVAL_SPARK
+e SCAN_INTERVAL_ROAR para 5 minutos via env vars no Railway.
+
+Racional: em mercado fraco, movimentos de altcoin duram 8 a 12 minutos. Com
+intervalos de 15-30 minutos, os protocolos chegavam ao sinal no final do
+movimento. 5 minutos reduz a janela de latencia de scheduling para o minimo
+pratico dado o tempo de execucao de cada scan (tipicamente 3 a 8s com
+paralelismo). Combinado com o filtro de momentum 1m, o scan mais frequente nao
+gera mais ruido — apenas detecta mais cedo.
+
+Cooldown ajustado de 15 para 10 minutos para manter proporcao: equivalente a
+duas janelas de scan sem repeticao do mesmo ativo.
+
+Alternativas descartadas: 1 minuto. Descartado por carga de API e custo de
+processamento desproporcionais. 10 minutos. Manteria latencia alta demais para
+movimentos curtos.
+
+---
+
+## [DEC-029] 2026-03-31 - Bear/crab mode nos protocolos de scan com filtro de momentum 1m
+
+Decisao: os protocolos Spark, Cascade e Top5 aceitam parametro regime
+(trending/crab/bear) e ajustam thresholds e logica de gatilho conforme o
+contexto de mercado.
+
+Em crab/bear:
+
+- Spark: presignal relaxado (2 velas, near_upper 3%), breakout substituido por
+  pre-breakout (close > bb_mid), filtro de momentum 1m obrigatorio (3 de 5 velas
+  bullish + vol_accel >= 1.3x)
+- Cascade: veto de MA no 1h vira warning (nao bloqueia), filtro de momentum 1m
+  obrigatorio na fase 2
+- Top5: change_min 24h de 10% para 5%, score_min de 7 para 6, penalidade de -1
+  se momentum 1m insuficiente
+
+Racional: a arquitetura multi-timeframe com veto do 1h foi desenhada para
+mercado trending. Em crab/bear, o 1h esta fraco por definicao — o veto duro
+eliminava entradas validas em micro-ondas de 8-12 minutos. O candle de 1m conta
+a verdade mais imediata nesses dias: sem momentum ali, nao ha entrada.
+
+Alternativas descartadas: protocolos separados para bear mode. Descartado por
+duplicacao de codigo e dificuldade de manutencao. Regime hardcoded por horario.
+Descartado por nao refletir a realidade — o mercado nao segue calendario.
+
+---
+
+## [DEC-028] 2026-03-31 - Market regime detector independente
+
+Decisao: criar modulo market_analyzer.py que classifica o regime de mercado
+(trending/crab/bear) com base em score BTC 0-4 e breadth de altcoins. Roda a
+cada hora em thread propria (silencioso) e sob demanda via "Claudinho, como ta
+hoje?". Persiste em tabela market_regime no Supabase. Todos os scanners
+consultam o regime mais recente ao inicio de cada ciclo via get_latest_regime().
+
+Classificacao:
+
+- trending: btc_score >= 3 e alts_above_5 >= 8
+- bear: btc_score <= 1 e alts_above_5 <= 3
+- crab: todo o resto
+
+BTC score (0-4): close > bb_mid 1h, bb_bands subindo 1h, macd_hist positivo e
+ascendente 1h, close > ma7 4h.
+
+Integra CryptoPanic Developer API para contexto de noticias importantes (ate 5
+headlines por execucao). Limite: ~720 chamadas/mes no ciclo agendado, dentro do
+plano Developer (1000/mes).
+
+Racional: os protocolos de scan precisam de contexto de mercado para ajustar
+comportamento — sem ele, aplicam logica de bull market em qualquer regime. O
+detector e independente dos scanners para nao adicionar latencia ao ciclo de
+scan de 5 minutos. O regime persiste no Supabase para sobreviver a
+reinicializacoes.
+
+Alternativas descartadas: detector embutido em cada scanner. Descartado por
+custo de API multiplicado por numero de protocolos rodando em paralelo.
+Classificacao manual via comando Telegram. Descartado por exigir intervencao
+humana constante.
+
+---
+
 ## [DEC-026] 2026-03-27 - Protocolo E Agora: Claude API para gestao de posicao em baixa
 
 Decisao: criar protocolo de gestao de risco acionado manualmente via Telegram
